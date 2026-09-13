@@ -1,0 +1,34 @@
+name: RC1 second qualification repair
+
+on:
+  push:
+    branches:
+      - phase21-rc1
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Apply qualification fixes if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch=.github/rc1-second-fix.patch
+          [[ -f "$patch" ]] || exit 0
+          if ! git apply --check "$patch"; then
+            echo "qualification patch already applied or no longer applicable"
+            exit 0
+          fi
+          git apply "$patch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/ci.yml .github/workflows/release.yml src/compat.rs src/runner/oci.rs tests/evidence/phase18-build-run-v10.json
+          git commit -m "Fix RC1 qualification tests and toolchain matrix"
+          git push origin HEAD:phase21-rc1
