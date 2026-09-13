@@ -2,7 +2,7 @@
 runner = "docker"
 image = "reprobisect-corpus/opensbi-riscv64:phase21"
 command = ["sh", "-lc", "make -j1 PLATFORM=generic CROSS_COMPILE=riscv64-linux-gnu-"]
-outputs = ["build/platform/generic/firmware/fw_dynamic.elf"]
+outputs = ["build/lib/sbi/sbi_init.o"]
 timeout_seconds = 600
 
 [experiments]
