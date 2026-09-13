@@ -1,0 +1,61 @@
+diff --git a/corpus/real-world/byteorder-rustc-build-path/reprobisect.toml b/corpus/real-world/byteorder-rustc-build-path/reprobisect.toml
+--- a/corpus/real-world/byteorder-rustc-build-path/reprobisect.toml
++++ b/corpus/real-world/byteorder-rustc-build-path/reprobisect.toml
+@@ -1,6 +1,6 @@
+ [build]
+ runner = "docker"
+-image = "rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
++image = "rust@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa"
+ command = ["sh", "-lc", "rustc --crate-name byteorder --crate-type lib -g --emit=obj src/lib.rs -o byteorder.o"]
+ outputs = ["byteorder.o"]
+ timeout_seconds = 180
+diff --git a/src/runner/oci.rs b/src/runner/oci.rs
+--- a/src/runner/oci.rs
++++ b/src/runner/oci.rs
+@@ -470,9 +470,6 @@ dependency_max_files="${13}"
+ dependency_max_bytes="${14}"
+ shift 14
+-if [ -n "$umask_value" ]; then
+-  umask "$umask_value"
+-fi
+ : > "$toolchain_probe"
+ if [ -f "$toolchain_spec" ]; then
+   tab=$(printf '\t')
+@@ -565,6 +562,14 @@ if [ "$dependency_enabled" = "1" ]; then
+   fi
+ fi
+ 
++run_build_command() {
++  if [ -n "$umask_value" ]; then
++    /bin/sh -c 'umask "$1"; shift; exec "$@"' reprobisect-umask "$umask_value" "$@"
++  else
++    "$@"
++  fi
++}
++
+ trace_requested=0
+ if [ "$network_trace_enabled" = "1" ] || [ "$file_trace_enabled" = "1" ]; then
+   trace_requested=1
+@@ -582,17 +587,22 @@ if [ "$trace_requested" = "1" ]; then
+      && strace -qq -e "trace=$trace_classes" -o /reprobisect-meta/strace-preflight.trace -- /bin/sh -c ':' >/dev/null 2>&1; then
+     printf 'available\n' > "$trace_status"
+-    strace -f -qq -s 256 -e "trace=$trace_classes" -o "$syscall_trace" -- "$@"
++    if [ -n "$umask_value" ]; then
++      strace -f -qq -s 256 -e "trace=$trace_classes" -o "$syscall_trace" -- \
++        /bin/sh -c 'umask "$1"; shift; exec "$@"' reprobisect-umask "$umask_value" "$@"
++    else
++      strace -f -qq -s 256 -e "trace=$trace_classes" -o "$syscall_trace" -- "$@"
++    fi
+     command_status=$?
+   else
+     printf 'unavailable\n' > "$trace_status"
+-    "$@"
++    run_build_command "$@"
+     command_status=$?
+   fi
+ else
+-  "$@"
++  run_build_command "$@"
+   command_status=$?
+ fi
+ 

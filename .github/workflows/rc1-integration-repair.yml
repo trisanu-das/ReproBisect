@@ -1,0 +1,34 @@
+name: RC1 integration repair
+
+on:
+  push:
+    branches:
+      - phase21-rc1
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Apply integration fixes if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch=.github/rc1-integration-fix.patch
+          [[ -f "$patch" ]] || exit 0
+          if ! git apply --check "$patch"; then
+            echo "integration patch already applied or no longer applicable"
+            exit 0
+          fi
+          git apply "$patch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add corpus/real-world/byteorder-rustc-build-path/reprobisect.toml src/runner/oci.rs
+          git commit -m "Fix Docker umask isolation and Rust corpus image"
+          git push origin HEAD:phase21-rc1
