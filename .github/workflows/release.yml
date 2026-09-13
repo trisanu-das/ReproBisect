@@ -38,8 +38,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: ${{ matrix.toolchain }}
-      - run: cargo +${{ matrix.toolchain }} check --all-targets
-      - run: cargo +${{ matrix.toolchain }} test --all-targets
+      - run: cargo +${{ matrix.toolchain }} check --locked --all-targets
+      - run: cargo +${{ matrix.toolchain }} test --locked --all-targets
 
   container-qualification:
     needs: rust-matrix
@@ -57,7 +57,7 @@ jobs:
       - name: Install Podman
         if: matrix.runner == 'podman'
         run: sudo apt-get update && sudo apt-get install -y podman
-      - run: cargo build
+      - run: cargo build --locked
       - name: Synthetic Docker fixtures
         if: matrix.runner == 'docker'
         run: ./scripts/test-fixtures.sh
@@ -87,7 +87,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.85.1
-      - run: cargo build --release
+      - run: cargo build --locked --release
       - name: Verify binary version
         run: test "$(target/release/reprobisect --version)" = "reprobisect 1.0.0-rc.1"
       - name: Build deterministic Linux bundle
