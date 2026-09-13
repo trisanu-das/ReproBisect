@@ -1,0 +1,150 @@
+name: External validation - ChatterBot
+
+on:
+  push:
+    branches:
+      - external-validation-chatterbot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chatterbot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.85.1
+
+      - name: Build ReproBisect
+        run: cargo build --locked
+
+      - name: Prepare pinned ChatterBot source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/trisanu-das/ChatterBot.git /tmp/chatterbot
+          git -C /tmp/chatterbot checkout d911b4ac46e122308a759ea6ec67b666136e3026
+          test "$(git -C /tmp/chatterbot rev-parse HEAD)" = "d911b4ac46e122308a759ea6ec67b666136e3026"
+
+      - name: Build pinned Python packaging image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/chatterbot-validation.Dockerfile <<'EOF'
+          FROM python:3.8-slim-bullseye
+          RUN python -m pip install --no-cache-dir setuptools==57.5.0 wheel==0.37.1
+          EOF
+          docker build -t reprobisect-chatterbot-validation:local -f /tmp/chatterbot-validation.Dockerfile /tmp
+          docker image inspect reprobisect-chatterbot-validation:local --format '{{.Id}}'
+
+      - name: Smoke-test real ChatterBot wheel build
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /tmp/chatterbot:/workspace \
+            -w /workspace \
+            reprobisect-chatterbot-validation:local \
+            python setup.py bdist_wheel
+          test -f /tmp/chatterbot/dist/ChatterBot-1.1.0a7-py2.py3-none-any.whl
+          ls -lh /tmp/chatterbot/dist/ChatterBot-1.1.0a7-py2.py3-none-any.whl
+          sudo rm -rf /tmp/chatterbot/build /tmp/chatterbot/dist /tmp/chatterbot/ChatterBot.egg-info
+
+      - name: ReproBisect - build path only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/chatterbot/.reprobisect.toml <<'EOF'
+          [build]
+          runner = "docker"
+          image = "reprobisect-chatterbot-validation:local"
+          command = ["python", "setup.py", "bdist_wheel"]
+          outputs = ["dist/ChatterBot-1.1.0a7-py2.py3-none-any.whl"]
+          timeout_seconds = 300
+
+          [experiments]
+          control_runs = 2
+          intervention_runs = 2
+          confirmation_runs = 1
+
+          [experiments.dimensions]
+          network_access = false
+          source_path = false
+          build_path = true
+          source_date_epoch = false
+          timezone = false
+          locale = false
+          hostname = false
+          source_mtime = false
+          cpu_count = false
+          umask = false
+          directory_order = false
+          EOF
+
+          set +e
+          target/debug/reprobisect check /tmp/chatterbot --format json > chatterbot-build-path.json
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+            echo "ReproBisect operational failure: exit $rc" >&2
+            exit "$rc"
+          fi
+          echo "ReproBisect exit: $rc"
+          python3 -m json.tool chatterbot-build-path.json
+
+      - name: ReproBisect - source mtime only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/chatterbot/.reprobisect.toml <<'EOF'
+          [build]
+          runner = "docker"
+          image = "reprobisect-chatterbot-validation:local"
+          command = ["python", "setup.py", "bdist_wheel"]
+          outputs = ["dist/ChatterBot-1.1.0a7-py2.py3-none-any.whl"]
+          timeout_seconds = 300
+
+          [experiments]
+          control_runs = 2
+          intervention_runs = 2
+          confirmation_runs = 1
+
+          [experiments.dimensions]
+          network_access = false
+          source_path = false
+          build_path = false
+          source_date_epoch = false
+          timezone = false
+          locale = false
+          hostname = false
+          source_mtime = true
+          cpu_count = false
+          umask = false
+          directory_order = false
+          EOF
+
+          set +e
+          target/debug/reprobisect check /tmp/chatterbot --format json > chatterbot-source-mtime.json
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+            echo "ReproBisect operational failure: exit $rc" >&2
+            exit "$rc"
+          fi
+          echo "ReproBisect exit: $rc"
+          python3 -m json.tool chatterbot-source-mtime.json
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chatterbot-reprobisect-validation
+          path: |
+            chatterbot-build-path.json
+            chatterbot-source-mtime.json
+          if-no-files-found: warn
