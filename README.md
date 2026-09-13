@@ -1,147 +1,62 @@
 # ReproBisect
 
-ReproBisect **1.0.0-rc.1** is a causal debugger for non-reproducible builds. The first stable-line candidate targets Linux containerized builds with an explicit command and declared output files, using controlled interventions rather than treating binary differences as root causes.
+**Find which environment input actually caused your build to change.**
 
-The core rule is stricter than ordinary binary diffing: **a difference or suspicious string is not a root cause**. ReproBisect establishes a repeatable baseline, intervenes on controlled environmental inputs, rebuilds, inspects the resulting artifact deltas, and—by default—reverts to the baseline before making a strong causal claim.
+ReproBisect is a causal debugger for non-reproducible builds.
 
-## Release-candidate status
+When the same source produces different artifacts on different machines, paths, timestamps, toolchains, or environments, tools such as binary diffing can tell you **what changed**. ReproBisect tries to determine **what caused it**.
 
-`1.0.0-rc.1` freezes the 1.0 CLI/status vocabulary and persisted evidence schemas. Final `1.0.0` promotion requires the compiler/MSRV, Docker, Podman, seven-case real-world corpus, dependency-lock, and deterministic packaging gates in [`docs/release-qualification.md`](docs/release-qualification.md). A skipped qualification gate is not considered a pass.
-
-The real-world corpus uses immutable Git commits and digest-pinned external OCI inputs. User project configs may still use image tags; each experiment records the runtime-resolved immutable image identity.
-
-### Exit codes
-
-- `0` — operation-specific success;
-- `1` — completed diagnostic operation with a finding/inconclusive outcome;
-- `2` — CLI usage error from Clap;
-- `5` — operational/internal error.
-
-Automation should use JSON report status in addition to the exit code.
-
-## Current experiment loop
+It repeatedly rebuilds your project in controlled containers, changes one environmental input at a time, and confirms a diagnosis by reverting to the baseline.
 
 ```text
-source snapshot
-   ↓
-canonical baseline × N
-   ↓ stable?
-   ├─ no  → UNCONTROLLED_NONDETERMINISM
-   └─ yes
-        ↓
-one-variable interventions
-        ↓
-SHA-256 + typed binary/package/archive evidence
-        ↓
-reversion confirmation
-        ↓
-optional interaction search / ddmin over individually inert variables
-        ↓
-evidence-backed diagnoses
-        ↓
-optional rule-based fix candidate + re-run of original failing intervention
+same source
+   │
+   ├── baseline build
+   ├── baseline build          ← first establish stability
+   │
+   ├── change build path only
+   ├── change timezone only
+   ├── change locale only
+   ├── change SOURCE_DATE_EPOCH only
+   │
+   └── revert to baseline      ← confirm the effect disappears
 ```
 
-Implemented intervention dimensions:
+If changing only the build path repeatedly changes the artifact, and reverting the path restores the original result, ReproBisect has evidence that the **build path is causal** rather than merely present somewhere in the binary.
 
-- coarse **build/container image** variants with resolved image/toolchain provenance,
-- narrow **toolchain executable bindings** (`CC`, `CXX`, `LD`, `AR`, `RANLIB`, `RUSTC`) within the same image,
-- one-file **dependency declaration/lockfile replacements** in the fresh workspace,
-- **network availability** (`default` vs `--network none`),
-- independent **source path** and **build/workspace path**,
-- `SOURCE_DATE_EPOCH`,
-- source-tree filesystem mtimes,
-- timezone (`TZ`),
-- locale (`LANG` / `LC_ALL`),
-- container hostname,
-- user-declared environment variables,
-- CPU quota/count with interleaved matched stochastic trials and one-sided Fisher exact evidence,
-- process umask,
-- best-effort source materialization/directory-order perturbation.
+## 60-second example
 
-Implemented evidence includes:
-
-- streaming SHA-256 for declared outputs,
-- exact controlled-value marker scans,
-- ELF section-table parsing with controlled-value localization to specific `.debug_*` sections,
-- GNU ELF build-ID extraction,
-- TAR, ZIP, `ar`, and gzip metadata inspection,
-- structural refinement of ZIP/ar/TAR outputs into JAR, Python wheel, DEB, and OCI-image tar types, plus bounded PE/COFF, Mach-O, and WebAssembly header detection,
-- bounded non-executing semantic summaries for selected JAR manifests, wheel `.dist-info` metadata, DEB container structure, OCI layout/index JSON, PE/COFF headers, Mach-O headers/UUIDs, and Wasm custom-section structure,
-- archive member order, mtime, uid/gid, mode, size, and container mtime deltas,
-- source-control and dependency-lock fingerprints, privacy-preserving parsed dependency-resolution summaries, controlled toolchain-binding probes with observed invocation counts, and best-effort image/toolchain provenance,
-- optional runtime dependency-cache provenance using before/after aggregate content fingerprints without persisting cache paths or member names,
-- optional redacted network-syscall summaries with call/success/failure counts plus endpoint-scope classes (`public`, `private`, `loopback`, `unix`, etc.); exact endpoints are not persisted.
-
-## Quick start
-
-Create a starter config:
+Suppose this succeeds:
 
 ```bash
-reprobisect init .
+make
 ```
 
-Minimal `.reprobisect.toml`:
+but `build/app` differs depending on where the project is built.
+
+Create `.reprobisect.toml`:
 
 ```toml
 [build]
+runner = "docker"
 image = "gcc:14"
-command = ["sh", "-lc", "make"]
+command = ["make"]
 outputs = ["build/app"]
-timeout_seconds = 600
-log_capture_max_bytes = 1048576
-
-[experiments]
-control_runs = 2
-intervention_runs = 1
-confirmation_runs = 1
-stochastic_runs = 4
-stochastic_alpha = 0.05
-image_variants = []
-network_trace = false
-file_input_trace = false
-syscall_trace_max_bytes = 33554432
-runtime_dependency_provenance = false
-dependency_cache_max_files = 2048
-dependency_cache_max_bytes = 134217728
-
-# Optional additional package-manager cache roots inside the container:
-# [experiments.dependency_cache_paths]
-# custom = "/root/.cache/custom"
-
-[experiments.dimensions]
-network_access = false
-source_path = false
-build_path = true
-source_date_epoch = true
-timezone = true
-locale = true
-hostname = true
-source_mtime = false
-cpu_count = false
-umask = false
-directory_order = false
 ```
 
-### Bounded build logs and experiment budgets
-
-ReproBisect drains build stdout/stderr concurrently so a verbose build cannot deadlock on a full pipe. Persisted text is bounded per stream by `build.log_capture_max_bytes` (default **1 MiB**, accepted range **64 KiB–16 MiB**), while the complete raw stream is still counted and SHA-256 hashed. `BuildRun` / `BuildFailure` evidence records the configured cap, total byte count, full-stream digest, and whether persisted text was truncated.
-
-This distinction matters for known-bad failure comparison: failure identity continues to use the complete stdout/stderr SHA-256 values even when only a prefix is retained for human-readable evidence.
-
-Ordinary deterministic repetition budgets are also bounded. Control, intervention, interaction, and environment-comparison run counts are capped at **32** per configured repetition dimension; command-line overrides are subject to the same ceilings. Stochastic CPU probing remains separately bounded at **3–1024** matched pairs because its sample size is part of the statistical test.
-
-Run the causal check:
+Then run:
 
 ```bash
 reprobisect check .
 ```
 
-`diagnose` is an explicit alias for the same pipeline:
+ReproBisect will:
 
-```bash
-reprobisect diagnose .
-```
+1. build the project repeatedly to verify the baseline is stable;
+2. rebuild it under controlled environmental changes;
+3. compare the declared artifact;
+4. localize relevant differences where possible;
+5. revert successful interventions before making strong causal claims.
 
 For machine-readable evidence:
 
@@ -149,38 +64,203 @@ For machine-readable evidence:
 reprobisect check . --format json
 ```
 
-## Toolchain/image and network hermeticity experiments
+That's the core workflow.
 
-A project may opt into coarse build-image comparisons:
+---
 
-```toml
-[experiments]
-image_variants = ["gcc:15"]
+## When should I use ReproBisect?
+
+Use ReproBisect when you have a question like:
+
+> “These two builds differ. Which environmental input is actually responsible?”
+
+Typical cases include:
+
+* debug paths embedded in ELF binaries;
+* timestamps or filesystem mtimes leaking into artifacts;
+* archive member metadata changing;
+* locale, timezone, hostname, or umask affecting output;
+* compiler/linker/archive-tool differences;
+* dependency declaration or lockfile changes;
+* build-image differences;
+* network-dependent builds;
+* parallelism-sensitive or stochastic build behavior;
+* interactions between multiple otherwise harmless variables.
+
+### ReproBisect vs other tools
+
+| Tool / approach     | Best question                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **diffoscope**      | *What bytes, sections, files, or metadata differ?*                                                             |
+| **reprotest**       | *Does this build remain reproducible under environment variation?*                                             |
+| **manual rebuilds** | *Does changing this thing seem to affect my build?*                                                            |
+| **ReproBisect**     | *Which tested environmental change causally explains the artifact difference, with repeat/reversion evidence?* |
+
+These tools are complementary.
+
+A useful workflow is often:
+
+```text
+ReproBisect → identify causal dimension
+diffoscope → deeply inspect the resulting artifact difference
 ```
 
-Every configured image reference is resolved to an immutable image ID through the selected OCI runtime before execution. ReproBisect also records best-effort compiler/linker/tool versions from the image. A positive image experiment is capped below high confidence because changing an image can change many inputs simultaneously; it is evidence that the **build environment image matters**, not proof that one compiler caused the result.
+ReproBisect is not intended to replace a detailed binary differ.
 
-Network availability is an independent opt-in dimension:
+---
+
+## Installation
+
+### Prebuilt Linux release
+
+Download the latest Linux archive from the GitHub Releases page and extract it:
+
+```bash
+tar -xzf reprobisect-1.0.0-x86_64-unknown-linux-gnu.tar.gz
+```
+
+Install the binary somewhere on your `PATH`:
+
+```bash
+sudo install -m 0755 \
+  reprobisect-1.0.0-x86_64-unknown-linux-gnu/reprobisect \
+  /usr/local/bin/reprobisect
+```
+
+Verify:
+
+```bash
+reprobisect --version
+```
+
+Expected:
+
+```text
+reprobisect 1.0.0
+```
+
+### Build from source
+
+ReproBisect requires Rust 1.85.1 or newer.
+
+```bash
+git clone https://github.com/trisanu-das/ReproBisect.git
+cd ReproBisect
+cargo build --locked --release
+```
+
+Then:
+
+```bash
+./target/release/reprobisect --version
+```
+
+### Runtime requirement
+
+You need a working OCI container runtime:
+
+* Docker, or
+* Podman.
+
+ReproBisect currently targets Linux containerized builds.
+
+---
+
+## Quick start
+
+You can generate a starter configuration:
+
+```bash
+reprobisect init .
+```
+
+Or create one yourself:
+
+```toml
+[build]
+runner = "docker"
+image = "gcc:14"
+command = ["make"]
+outputs = ["build/app"]
+```
+
+Then:
+
+```bash
+reprobisect check .
+```
+
+`diagnose` is an explicit alias:
+
+```bash
+reprobisect diagnose .
+```
+
+### Using Podman
+
+```toml
+[build]
+runner = "podman"
+image = "gcc:14"
+command = ["make"]
+outputs = ["build/app"]
+```
+
+The rest of the workflow is unchanged.
+
+---
+
+## What does ReproBisect vary?
+
+The default deterministic experiment set covers several common sources of build nondeterminism, including:
+
+* build/workspace path;
+* `SOURCE_DATE_EPOCH`;
+* timezone;
+* locale;
+* hostname.
+
+Additional dimensions can be enabled explicitly.
+
+For example:
 
 ```toml
 [experiments.dimensions]
 network_access = true
+source_path = true
+source_mtime = true
+cpu_count = true
+umask = true
+directory_order = true
 ```
 
-The variant executes with Docker `--network none`. A repeatable non-zero build-command exit is retained as evidence that the tested build flow requires network availability. Runner/Docker failures remain infrastructure errors and are not converted into causal evidence. This experiment does not yet identify endpoints or downloaded bytes.
+ReproBisect also supports more targeted experiments such as alternate build images, specific toolchain executables, dependency files, and user-declared environment variables.
 
-ReproBisect also records the containing Git commit/dirty state, hashes common dependency lock/manifest files, resolves image IDs, and records best-effort toolchain versions. Parsed resolution summaries now cover Cargo, npm/pnpm/yarn, Poetry/Pipenv/uv/pinned requirements, Go, Bundler, Composer, and Gradle. Persisted parsed provenance contains only ecosystem, package count, and a hash of normalized coordinates; package names, registry URLs, and raw lockfile contents are not copied into that parsed provenance record. These are provenance records, not a claim that the build is fully hermetic.
+### Toolchain experiment
 
-For a narrower toolchain experiment within one image:
+Instead of swapping an entire image, compare a single tool within the same image:
 
 ```toml
 [experiments.toolchain_variables]
 CC = ["gcc", "clang"]
 ```
 
-The selected binding is exposed through a stable wrapper path inside the same resolved image. The wrapper delegates to the controlled executable and records only an invocation count—never command-line arguments. A toolchain diagnosis reaches high confidence only when both baseline and variant executables were actually observed being invoked, the artifact effect is repeatable, and baseline reversion succeeds. This makes `AR`/`LD`/`CC` experiments materially narrower than image-level comparisons without pretending that an uninvoked environment binding caused anything.
+Supported bindings include tools such as:
 
-A dependency declaration can be varied one file at a time without touching the checkout:
+```text
+CC
+CXX
+LD
+AR
+RANLIB
+RUSTC
+```
+
+ReproBisect records whether the selected executable was actually invoked before treating the result as strong evidence.
+
+### Dependency-file experiment
+
+Test one dependency declaration or lockfile replacement:
 
 ```toml
 [[experiments.dependency_variants]]
@@ -189,85 +269,132 @@ target = "requirements.txt"
 variant_file = "requirements.variant.txt"
 ```
 
-ReproBisect copies the project into a fresh workspace and replaces only `target` there. Evidence records the target and before/after SHA-256 values; it does not persist parsed private package coordinates from the variant file.
+The user's checkout is not modified; the replacement happens in a fresh experiment workspace.
 
-Optional best-effort syscall provenance is opt-in. `network_trace = true` records redacted network/process classes; `file_input_trace = true` records process-aware dependency/cache opens, readable mappings of classified descriptors, declared-output writes, and rename publication into declared outputs. When either mode is enabled, ReproBisect grants `SYS_PTRACE` only to that build container and performs an in-container `strace` preflight. If tracing is unavailable or blocked, the real build runs untraced and provenance is marked unavailable instead of turning instrumentation failure into a project build failure. Raw traces remain ephemeral under `/reprobisect-meta`. Persisted evidence contains only aggregate syscall classes, coarse endpoint scopes, anonymous process identifiers and parent links, coarse process roles, lineage depth, and event counts. Exact IP addresses, ports, hostnames, argv, container PIDs, dependency/cache paths, temporary paths, and raw traces are not persisted.
-
-Trace parsing is bounded by `syscall_trace_max_bytes` (default 32 MiB; configurable from 1 to 512 MiB). Truncation is explicit. The bound limits parser memory/input, not temporary `strace` disk growth. Phase 11 additionally follows dependency/cache descriptor identity across `dup*`, inherited descriptors across traced process creation, readable `mmap`, and temporary-file rename chains long enough to report same-lineage publication into a declared output. It can therefore report both same-process and strict-ancestor input/network/output co-occurrence while keeping raw PIDs and paths ephemeral. These correlations are still **not byte-level taint/dataflow proof**: IPC/shared memory, `close_range`, platform-specific mapping syscalls, unresolved `dirfd`/cwd path semantics, and arbitrary in-memory propagation remain outside the model.
-
-Runtime package/dependency provenance is independently opt-in:
-
-```toml
-[experiments]
-runtime_dependency_provenance = true
-dependency_cache_max_files = 2048
-dependency_cache_max_bytes = 134217728
-
-[experiments.dependency_cache_paths]
-my-cache = "/tmp/my-package-cache"
-```
-
-For known package-manager cache roots plus any configured roots, ReproBisect records bounded before/after content summaries. Per cache root it hashes at most `dependency_cache_max_files` files and at most `dependency_cache_max_bytes` cumulative bytes. A summary records file count, sampled byte count, aggregate SHA-256, and whether the bound truncated observation. If either side is truncated, the comparison is explicitly incomplete: ReproBisect may report an observed difference, but it does **not** promote that difference to a confirmed cache mutation. Directory traversal itself remains best-effort; the bounds limit content hashing work rather than proving constant-time cache enumeration.
-
-Cache paths, member names, package coordinates, and raw package-manager output are not persisted. Configured custom cache-root mappings are runtime-only and are explicitly omitted from serialized controlled-environment evidence. When `network_trace = true` is enabled at the same time, ReproBisect records coarse build-window co-occurrence between successful non-local network activity and complete cache mutations. With `file_input_trace = true`, it can additionally report whether the same anonymous process read a dependency declaration or dependency cache and wrote a declared output; if network tracing is also enabled it can report same-process network/cache/output co-occurrence. These signals are **not** byte provenance: they do not identify which response or input byte influenced a particular output byte.
-
-## Independent source and build paths
-
-The controlled baseline exposes the fresh source snapshot at two container aliases:
-
-```text
-source path: /src
-build path:  /workspace
-```
-
-Ordinary in-source commands can ignore `/src` and continue to execute in `/workspace`. To make an out-of-tree or explicit-source command participate in an independent source-path experiment, command arguments may contain `{source}` and `{build}` placeholders:
-
-```toml
-[build]
-image = "gcc:14"
-command = [
-  "sh", "-lc",
-  "mkdir -p {build}/build && gcc -g -o {build}/build/app {source}/main.c"
-]
-outputs = ["build/app"]
-
-[experiments.dimensions]
-source_path = true
-build_path = false
-```
-
-ReproBisect substitutes the controlled container paths before invoking Docker. The source-path intervention changes only the source alias; the build-path intervention changes only the cwd/build alias.
-
-## Project-specific environment variables
-
-ReproBisect cannot safely guess which arbitrary environment variables are intended build inputs. Declare the variables to perturb:
+### Project-specific environment variable
 
 ```toml
 [experiments.environment_variables]
-BUILD_FLAVOR = ["alpha", "beta"]
-FEATURE_SET = ["baseline", "variant"]
+BUILD_FLAVOR = ["release", "debug"]
 ```
 
-The first value becomes part of the canonical baseline and the second is the intervention value.
+The first value becomes the controlled baseline and the second the intervention.
 
-## Multi-variable interactions
+---
 
-Single-variable experiments cannot detect a build that changes only when two or more inputs move together. Interaction search is therefore available explicitly:
+## How causal diagnosis works
 
-```toml
-[experiments]
-interaction_search = true
-interaction_runs = 2
-max_interaction_variables = 8
+A normal deterministic experiment follows roughly this sequence:
+
+```text
+1. Snapshot source
+        ↓
+2. Build canonical baseline multiple times
+        ↓
+   stable?
+   ├── no  → uncontrolled nondeterminism
+   └── yes
+        ↓
+3. Change one controlled input
+        ↓
+4. Rebuild and compare artifacts
+        ↓
+5. Repeat the intervention
+        ↓
+6. Revert to baseline
+        ↓
+7. Promote evidence-backed diagnoses
 ```
 
-ReproBisect considers **individually inert, successfully tested variables**, first checks their combined effect, then uses a ddmin-style search to find a 1-minimal observed failure-inducing set. The minimized set is repeated and baseline-reverted before it is promoted to an interaction diagnosis.
+That final reversion matters.
 
-Interaction results are scoped to the tested candidate set; they are not claimed to be globally unique root causes.
+Seeing `/tmp/build-A` in one binary and `/tmp/build-B` in another is useful evidence, but it does not by itself prove that the build directory caused the difference.
 
-## Stochastic parallelism
+ReproBisect deliberately distinguishes **correlation** from **intervention-backed diagnosis**.
 
-Enable CPU/parallelism experiments explicitly:
+---
+
+## Artifact evidence
+
+ReproBisect hashes every declared output with SHA-256 and can extract additional structural evidence from common artifact formats.
+
+Current analysis includes support for evidence from:
+
+* ELF;
+* TAR;
+* ZIP;
+* `ar`;
+* gzip;
+* JAR;
+* Python wheels;
+* DEB packages;
+* OCI image tar layouts;
+* PE/COFF;
+* Mach-O;
+* WebAssembly.
+
+Depending on the format, ReproBisect can inspect information such as:
+
+* ELF sections and debug-path localization;
+* GNU build IDs;
+* archive member order;
+* timestamps;
+* uid/gid;
+* permission modes;
+* member sizes;
+* selected package metadata;
+* selected executable/container structural metadata.
+
+The artifact analyzer is intentionally bounded and non-executing.
+
+For deep byte-level inspection, use a dedicated tool such as `diffoscope` after ReproBisect has narrowed the causal dimension.
+
+---
+
+## Fixing a diagnosed problem
+
+For a limited set of well-supported diagnoses, ReproBisect can propose conservative fixes:
+
+```bash
+reprobisect fix .
+```
+
+To test the proposed fix:
+
+```bash
+reprobisect fix . --verify
+```
+
+Current rule-based fixes include cases involving:
+
+* compiler path remapping;
+* `SOURCE_DATE_EPOCH`;
+* source/archive mtime normalization;
+* umask/mode normalization.
+
+Fix verification happens in a temporary copy of the project.
+
+**ReproBisect does not silently modify your working tree.**
+
+If it cannot identify a conservative patch point, it refuses to invent one.
+
+---
+
+## Uncontrolled nondeterminism
+
+ReproBisect first asks whether the canonical baseline reproduces itself.
+
+If repeated baseline builds already differ, one-variable causal experiments are not trustworthy.
+
+In that case ReproBisect reports uncontrolled nondeterminism instead of manufacturing a root-cause diagnosis.
+
+This distinction is important for races, random seeds, unordered parallel work, external services, and other stochastic effects.
+
+---
+
+## Parallelism and stochastic builds
+
+CPU/parallelism effects can be tested explicitly:
 
 ```toml
 [experiments]
@@ -278,151 +405,196 @@ stochastic_alpha = 0.05
 cpu_count = true
 ```
 
-The canonical baseline uses one CPU and exports `REPROBISECT_CPU_COUNT=1`; the intervention uses two CPUs. For each stochastic trial ReproBisect now runs an interleaved baseline reference followed by one variant build. Each run is classified by whether its declared-artifact signature differs from the original stable baseline signature. A fixed-sample, one-sided Fisher exact test compares the baseline-reference and variant change rates. The persisted evidence includes both rates, their absolute difference, the p-value, alpha, and a conservative classification.
+ReproBisect uses matched baseline/variant trials and a one-sided Fisher exact test to determine whether the intervention measurably changes the artifact-change rate.
 
-A statistical result is promoted only when the variant change rate is larger and `p <= stochastic_alpha`. If any matched baseline reference itself changes, the earlier control-stability assumption has been contradicted: the overall check becomes `UNCONTROLLED_NONDETERMINISM`, causal diagnoses are suppressed, and interaction ddmin is skipped. The test quantifies a distribution shift under the tested CPU setting; it does not localize the internal race or correct automatically for an arbitrary family of many stochastic hypotheses.
+This can show that parallelism affects the distribution of outputs.
 
-## `reprobisect fix`
+It does **not** identify the internal race itself.
 
-The fix pipeline is deliberately rule-based. For supported medium/high-confidence diagnoses, ReproBisect can propose operational normalizations without editing project files:
+---
 
-```bash
-reprobisect fix .
-```
+## Multi-variable interactions
 
-To experimentally verify a supported candidate:
+Some bugs appear only when multiple variables change together.
 
-```bash
-reprobisect fix . --verify
-```
-
-Current candidates cover compiler path remapping, `SOURCE_DATE_EPOCH` pinning, source-mtime normalization when archive metadata proves mtime sensitivity, and umask/mode normalization when archive metadata proves mode sensitivity. GNU-tar source-mtime/umask candidates now have conservative project patch points for conventional Make builds, one unambiguous literal tar invocation in CMake or Meson, and one detected packaging shell script. CMake uses `${CMAKE_COMMAND} -E env`; Meson and shell-script candidates scope `TAR_OPTIONS` around the selected command. Ambiguous multi-site packaging logic is refused. Every existing-file replacement carries a SHA-256 stale-file precondition and is verified only in a temporary checkout. When no conservative tar patch point exists, they fall back to runner-level operational normalization. Path-remapping patches now have conservative build-system-specific insertion points: root `Makefile`, root `CMakeLists.txt`, root `meson.build`, or a newly created `.cargo/config.toml` when no Cargo config already exists. `SOURCE_DATE_EPOCH` can likewise use a temporary Cargo config for Cargo builds or the existing Makefile rule. Existing-file patches carry a SHA-256 stale-file precondition; create patches refuse to overwrite an existing path. Verification copies the project to a temporary tree, applies only that patch, and replays the original failing intervention. The user's checkout is never modified. If no project patch is available, compiler remapping falls back to an existing declared compiler-flag environment injection point.
-
-A candidate is marked `VERIFIED` only when:
-
-1. repeated fixed-baseline builds are byte-stable,
-2. repeated builds under the **original failing intervention** are byte-stable, and
-3. the intervention artifacts are byte-identical to the fixed baseline.
-
-No source, Makefile, or build script in the user checkout is modified automatically. Project patch candidates are applied only to temporary verification copies.
-Persisted fix plans contain only the proposed flag additions; existing compiler-flag values are combined with them in memory during verification and are not copied into fix evidence.
-
-## Status semantics
-
-`REPRODUCIBLE_WITHIN_TESTED_SPACE` means the declared outputs were byte-identical across the repeated controlled baseline and every successfully completed configured experiment. It is not proof of universal reproducibility.
-
-`NON_REPRODUCIBLE` means a stable baseline produced different declared artifact bytes under at least one explicit intervention or confirmed interaction.
-
-A repeatable build-command failure with networking disabled produces a network-dependence diagnosis but leaves the overall byte-reproducibility result `INCONCLUSIVE`, because no comparable offline artifact exists.
-
-`UNCONTROLLED_NONDETERMINISM` means repeated builds under the same controlled baseline differed. Deterministic attribution stops at that gate.
-
-`INCONCLUSIVE` means the baseline was stable but one or more requested experiments could not be completed, so ReproBisect refuses to make a positive reproducibility claim.
-
-## Evidence and privacy
-
-Evidence is stored locally under `.reprobisect/` and excluded from source hashing/workspace copies:
-
-```text
-.reprobisect/runs/<experiment-id>/run-....json
-.reprobisect/experiments/<experiment-id>.json
-.reprobisect/fixes/<diagnosis-experiment-id>.json
-.reprobisect/comparisons/<experiment-id>.json
-```
-
-Evidence files are create-only. Values from ordinary `[build.env]` entries are passed to the selected OCI runner but redacted in persisted run manifests. Explicit experiment values remain visible because they form part of the causal record.
-
-### Historical evidence compatibility
-
-Phase 19 adds an explicit reader/migration boundary for persisted JSON evidence:
-
-```bash
-reprobisect evidence .reprobisect/experiments/<id>.json
-reprobisect evidence old.json --normalized-output normalized.json
-```
-
-`--format json` prints the normalized current-schema document. `--normalized-output` is create-only unless `--force` is passed. Even with `--force`, the source evidence path cannot be used as the destination and an existing destination symlink is refused. Input JSON is bounded to **64 MiB**.
-
-The supported historical boundary is the frozen **Phase 6** release. Current Phase 19 readers accept CheckReport schemas **5–14**, BuildRun/BuildFailure schemas **1–10**, FixReport schemas **2–12**, and EnvironmentComparisonReport schemas **1–4** (comparison evidence begins in Phase 14). Older schemas are rejected rather than heuristically guessed, and future schema versions are rejected with an explicit upgrade error.
-
-Normalization fills only compatibility-safe defaults and performs two explicit historical migrations. Pre-Phase-18 run/failure records stored complete UTF-8 stdout/stderr text but no raw-stream digest metadata; normalization derives the same text-based hashes and byte counts used by the older failure-identity logic. This cannot reconstruct original non-UTF8 raw bytes. Phase-8 unbounded dependency-cache summaries are marked complete/non-truncated and use `max_files = 0`, `max_bytes = 0` as **unknown historical bounds** rather than inventing a limit. The compatibility command reports both migrations.
-
-The frozen Phase 6–18 schema sequence is checked by `tests/evidence-schema-matrix.json`; current schema constants are centralized in `src/schema.rs` so producers and readers cannot drift through copied numeric literals. See [`docs/evidence-compatibility.md`](docs/evidence-compatibility.md) for the compatibility contract.
-
-Marker scanning is bounded and searches only controlled experiment values; ReproBisect does not persist unrestricted binary string dumps.
-
-## Development
-
-```bash
-python3 scripts/static-check.py
-cargo check --all-targets
-cargo test --all-targets
-./scripts/test-fixtures.sh   # requires Docker
-python3 scripts/real-world-corpus.py validate
-python3 scripts/real-world-corpus.py run --tier smoke --binary target/debug/reprobisect
-```
-
-The primary Docker fixture suite covers positive and negative causal cases, structural archive/package metadata and type-aware JAR/wheel/DEB/OCI/PE/Mach-O/Wasm classification, stochastic parallelism, a two-variable interaction, independent source-path sensitivity, build-image/network hermeticity cases, observed `CC`/`AR` invocation, bounded runtime dependency-cache provenance, multi-ecosystem normalized lockfile provenance, process-aware dependency/cache/output provenance, and verified Make/Cargo/shell path/timestamp/mtime/umask normalization rules including project-level GNU tar fixes.
-
-Phase 20 also includes a separate **pinned real-world OSS corpus**. It fetches exact upstream commits instead of vendoring source and keeps the overlay invisible to Git dirty-state logic. Normal CI runs a four-case Docker smoke tier; an explicit workflow runs the heavier extended tier with Docker or Podman. Aggregate corpus JSON records the exact ReproBisect binary SHA-256 and full per-case reports. See [`docs/real-world-validation.md`](docs/real-world-validation.md) and [`corpus/README.md`](corpus/README.md).
-
-See [`docs/problem-statement-and-v0.1-spec.md`](docs/problem-statement-and-v0.1-spec.md) for the design target and [`docs/implementation-status.md`](docs/implementation-status.md) for the precise current boundary.
-
-
-## Known-good / known-bad environment comparison
-
-When two environments are already known to produce different successful artifacts—or when a known-good build succeeds and a known-bad environment fails reproducibly—use `compare` instead of asking the generic intervention planner to rediscover the entire delta:
-
-```bash
-reprobisect compare . --good good.toml --bad bad.toml
-```
-
-A comparison manifest is intentionally narrower than `.reprobisect.toml`. It can control image, in-container source/build paths, source copy order, `SOURCE_DATE_EPOCH`, source mtimes, timezone/locale, hostname, CPU count, umask, network availability, selected environment variables, narrow toolchain bindings, and project-relative dependency-file substitutions.
-
-Example:
+Interaction search can be enabled with:
 
 ```toml
-# good.toml
-build_path = "/workspace/good"
-source_date_epoch = 1700000000
-umask = "022"
-
-[variables]
-BUILD_FLAVOR = "stable"
-
-[toolchain]
-CC = "gcc"
+[experiments]
+interaction_search = true
+interaction_runs = 2
+max_interaction_variables = 8
 ```
+
+ReproBisect first identifies variables that were individually inert, then tests their combined effect and applies a ddmin-style search to find a 1-minimal observed interaction.
+
+The resulting set is evidence about the tested variables, not a claim that no other explanation exists.
+
+---
+
+## Provenance and tracing
+
+ReproBisect can optionally collect bounded, privacy-conscious provenance about the build.
+
+Examples include:
+
+* source Git commit and dirty state;
+* dependency lock/manifest fingerprints;
+* resolved container image identity;
+* best-effort toolchain versions;
+* tool invocation counts;
+* aggregate dependency-cache fingerprints;
+* redacted network syscall summaries;
+* process-aware file-input/output relationships.
+
+Optional tracing:
 
 ```toml
-# bad.toml
-build_path = "/workspace/bad"
-source_date_epoch = 1700001234
-umask = "077"
-
-[variables]
-BUILD_FLAVOR = "candidate"
-
-[toolchain]
-CC = "clang"
+[experiments]
+network_trace = true
+file_input_trace = true
 ```
 
-ReproBisect first repeats both endpoints. The known-good endpoint must stably succeed and produce one declared-artifact signature. The known-bad endpoint may either stably produce a different artifact signature or stably exit non-zero. For artifact-producing bad endpoints, a subset counts as reproducing only when every repeated subset run matches the **exact known-bad declared-artifact signature**. For build-failure bad endpoints, every repeated subset run must reproduce the exact failure signature: **exit code plus SHA-256 of stdout and stderr**. Merely producing something different from known-good, or merely returning the same generic non-zero code with different diagnostics, is insufficient. The result is reported as a 1-minimal observed bad-environment delta under the tested values, search path, and repetition policy.
+Raw traces remain ephemeral.
 
-`[experiments] comparison_runs` and `comparison_subset_runs` default to `2` and can be overridden with `--runs` / `--subset-runs`.
+Persisted evidence intentionally avoids recording data such as:
 
-Comparison-manifest controlled values are evidence and are persisted in run manifests and delta records. **Do not put credentials or secrets in comparison manifests.** Secrets that are not experimental variables belong in ordinary `[build.env]`, whose values remain redacted from persisted evidence.
+* exact network endpoints;
+* command-line arguments from traced processes;
+* raw container PIDs;
+* dependency-cache paths;
+* arbitrary temporary paths;
+* raw syscall traces.
 
-Known-bad build failures are minimized conservatively. ReproBisect requires repeated bad-endpoint failures to have the same exit code and exact stdout/stderr hashes before ddmin starts. This reproduces an observed process outcome; it does not prove that two matching diagnostics came from the same semantic root cause. A known-good endpoint that itself exits non-zero remains unsupported.
+These signals are provenance and correlation evidence. They are **not byte-level taint tracking**.
 
-## OCI runner backends
+---
 
-ReproBisect can execute the same controlled experiment model through either Docker or Podman:
+## Machine-readable evidence
 
-```toml
-[build]
-runner = "docker" # default
-# runner = "podman"
+Use:
+
+```bash
+reprobisect check . --format json
 ```
 
-The selected backend is recorded in every `BuildRun` and `BuildFailure`. Image resolution, toolchain probing, build execution, timeout termination, and fix verification all use the same configured runtime. ReproBisect does not compare Docker and Podman as a causal variable in this release; changing the runner is an explicit project configuration choice.
+for automation or downstream analysis.
+
+Exit codes:
+
+| Code | Meaning                                                              |
+| ---: | -------------------------------------------------------------------- |
+|  `0` | operation-specific success                                           |
+|  `1` | completed diagnostic operation with a finding or inconclusive result |
+|  `2` | command-line usage error                                             |
+|  `5` | operational/internal error                                           |
+
+Automation should inspect the JSON report status rather than relying only on the process exit code.
+
+Persisted evidence has explicit schemas and compatibility handling. See:
+
+* [`docs/evidence-compatibility.md`](docs/evidence-compatibility.md)
+* [`docs/architecture.md`](docs/architecture.md)
+
+---
+
+## Current scope
+
+ReproBisect 1.0 focuses on:
+
+* Linux;
+* Docker and Podman;
+* containerized builds;
+* an explicit build command;
+* one or more declared output artifacts.
+
+It does **not** currently promise to:
+
+* automatically understand every build system;
+* prove full build hermeticity;
+* trace individual bytes through a process;
+* identify arbitrary nondeterministic code inside your program;
+* replace detailed artifact diffing;
+* guarantee that every possible environmental variable has been tested.
+
+A diagnosis means:
+
+> Under the controlled experiment that was actually performed, changing this tested input repeatedly changed the observed artifact, and the configured confirmation criteria were satisfied.
+
+That is deliberately narrower than “we found every cause of nondeterminism.”
+
+---
+
+## Validation
+
+ReproBisect's release qualification includes:
+
+* Rust MSRV and current stable compiler checks/tests;
+* locked dependency resolution;
+* Docker acceptance tests;
+* Podman acceptance tests;
+* synthetic reproducibility fixtures;
+* real-world builds pinned to immutable upstream commits;
+* deterministic Linux release packaging.
+
+The real-world corpus currently contains seven cases spanning C/C++, Rust, Python packaging, and OpenSBI-based build scenarios.
+
+See:
+
+* [`corpus/README.md`](corpus/README.md)
+* [`docs/real-world-validation.md`](docs/real-world-validation.md)
+* [`docs/release-qualification.md`](docs/release-qualification.md)
+
+---
+
+## Documentation
+
+For the details intentionally kept out of this README:
+
+* [Architecture](docs/architecture.md)
+* [Experiment model](docs/experiment-model.md)
+* [Evidence compatibility](docs/evidence-compatibility.md)
+* [Real-world validation](docs/real-world-validation.md)
+* [Release qualification](docs/release-qualification.md)
+* [Implementation status](docs/implementation-status.md)
+* [Detailed problem statement and original specification](docs/problem-statement-and-v0.1-spec.md)
+
+---
+
+## Found a build ReproBisect cannot explain?
+
+That is particularly useful.
+
+If you have a real build that changes across machines or environments and ReproBisect:
+
+* misses the cause;
+* produces a false diagnosis;
+* becomes inconclusive unexpectedly;
+* cannot represent the relevant environment difference; or
+* fails on an artifact/build system we should support,
+
+please open an issue with a minimized reproducer if possible.
+
+Real unexplained builds are the most useful input for deciding what ReproBisect should support next.
+
+---
+
+## Security and privacy
+
+See [`SECURITY.md`](SECURITY.md) for the supported-version and vulnerability-reporting policy.
+
+ReproBisect deliberately bounds persisted logs and tracing evidence and avoids persisting several classes of potentially sensitive runtime details. Review the provenance/tracing documentation before enabling those features on confidential builds.
+
+---
+
+## Contributing
+
+Bug reports, minimized non-reproducible builds, new regression fixtures, documentation improvements, and narrowly scoped feature proposals are welcome.
+
+For significant new experiment dimensions or evidence-schema changes, open an issue first so the causal model and compatibility implications can be discussed before implementation.
+
+---
+
+## License
+
+See [`LICENSE`](LICENSE).
