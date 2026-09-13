@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   lockfile:
@@ -17,13 +17,25 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.85.1
       - run: cargo +1.85.1 generate-lockfile
+      - name: Verify lockfile identity
+        run: echo 'ae3414b86e7c5a89b71fe4b7e57fff11fc3e6de2dcf953665042fba0dbd788cb  Cargo.lock' | sha256sum -c -
       - run: cargo +1.85.1 check --locked --all-targets
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: Cargo.lock-1.85.1
-          path: Cargo.lock
-          if-no-files-found: error
+      - name: Commit exact lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add Cargo.lock
+          if git diff --cached --quiet; then
+            echo 'Cargo.lock already matches the qualified artifact'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Replace Cargo.lock with qualified MSRV lockfile'
+          git push origin HEAD:phase21-rc1
