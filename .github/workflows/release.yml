@@ -3,6 +3,8 @@ name: Release qualification
 on:
   workflow_dispatch:
   push:
+    branches:
+      - 'phase21-rc1'
     tags:
       - 'v*'
 
