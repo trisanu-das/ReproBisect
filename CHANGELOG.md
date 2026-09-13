@@ -10,7 +10,9 @@ Release-hardening candidate for the first stable line.
 - pins GitHub Actions dependencies by exact commit;
 - adds an MSRV/stable compiler matrix and explicit release qualification workflow;
 - adds security/privacy guidance and a machine-checkable release policy;
-- adds deterministic Linux release-bundle packaging after all qualification jobs pass.
+- adds deterministic Linux release-bundle packaging after all qualification jobs pass;
+- hands rootful Docker umask experiment outputs back to the host owner without changing artifact modes or bytes, avoiding false `inconclusive` results from unreadable bind-mounted files;
+- corrects the byteorder Rust smoke-case OCI pin to the official Rust toolchain image so `rustc` is present during qualification.
 
 Promotion from this release candidate to `1.0.0` requires the full compiler, Docker, Podman, synthetic-fixture, and seven-case real-world qualification gates described in `docs/release-qualification.md`.
 
