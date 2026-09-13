@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0 — Stable
+
+First stable ReproBisect release.
+
+- retains the Phase 21 persisted-evidence schema freeze: CheckReport 14, BuildRun/BuildFailure 10, FixReport 12, and EnvironmentComparisonReport 4;
+- commits the Cargo dependency lock generated and checked with Rust 1.85.1;
+- enforces `--locked` across CI, fixture, real-world corpus, release-build, and release-policy compiler/test gates;
+- qualifies the same seven-case real-world OSS corpus under both Docker and Podman before packaging;
+- packages the Linux release deterministically only after source policy, MSRV/stable Rust, Docker, and Podman qualification succeed.
+
 ## 1.0.0-rc.1 — Phase 21
 
 Release-hardening candidate for the first stable line.

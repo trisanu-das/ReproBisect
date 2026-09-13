@@ -1,12 +1,12 @@
 # ReproBisect 1.0 release qualification
 
-This document defines the promotion gate for the first stable ReproBisect line. Phase 21 freezes **`1.0.0-rc.1`**, not an unconditional `1.0.0` claim.
+This document defines the qualification contract for the first stable ReproBisect line, `1.0.0`.
 
 A source tree can be internally consistent without having been compiled or exercised against an OCI runtime. ReproBisect therefore separates **source-policy qualification** from **execution qualification** and does not treat a skipped gate as a pass.
 
 ## Frozen compatibility contract
 
-The 1.0 release candidate freezes these persisted evidence ranges:
+The 1.0 stable line freezes these persisted evidence ranges:
 
 | Evidence family | Oldest supported | Current/frozen |
 | --- | ---: | ---: |
@@ -21,18 +21,18 @@ The command names `init`, `check`, `diagnose`, `compare`, `fix`, and `evidence`,
 
 ## Qualification gates
 
-A commit may be promoted from `1.0.0-rc.1` to `1.0.0` only when **all** of the following pass on the exact candidate commit:
+The `1.0.0` release commit is qualified only when **all** of the following pass on that exact commit:
 
 1. **Source policy** — `python3 scripts/release-check.py --source-only`, repository static/schema guards, TOML/JSON parsing, shell syntax, immutable corpus inputs, and commit-pinned GitHub Actions.
-2. **Compiler/MSRV** — Rust 1.85.x and current stable both pass `cargo check --all-targets` and `cargo test --all-targets`.
+2. **Compiler/MSRV** — Rust 1.85.x and current stable both pass `cargo check --locked --all-targets` and `cargo test --locked --all-targets`.
 3. **Docker synthetic suite** — the full deterministic fixture harness passes under Docker.
 4. **Podman synthetic suite** — the Podman acceptance harness passes.
 5. **Real-world OSS corpus** — all seven Phase 20/21 cases pass under both Docker and Podman, retaining the aggregate JSON reports as release evidence.
 6. **Security/privacy review** — `SECURITY.md` remains accurate; no new host credential/socket mounts, secret persistence, unbounded evidence paths, or silent checkout mutation are introduced.
-7. **Packaging** — the release binary reports the exact candidate version and the Linux bundle is generated with normalized tar metadata plus `gzip -n`; its SHA-256 is retained.
-8. **Stable dependency lock** — before the final `1.0.0` tag, generate and commit `Cargo.lock` with the release toolchain, rerun the compiler/test gates with `--locked`, and ensure the tree is otherwise unchanged. The RC source deliberately does not claim this gate in environments where Cargo resolution cannot be performed.
+7. **Packaging** — the release binary reports the exact stable version and the Linux bundle is generated with normalized tar metadata plus `gzip -n`; its SHA-256 is retained.
+8. **Stable dependency lock** — `Cargo.lock` is committed from the Rust 1.85.1 release toolchain and every ReproBisect compiler/test/build gate consumes it with `--locked`.
 
-`.github/workflows/release.yml` directly encodes gates 1–7 for the release candidate, including both the MSRV and stable Rust compiler lanes. The final stable promotion must additionally switch the package version to `1.0.0`, commit the resolved lockfile, change the release build to `--locked`, and rerun the same workflow.
+`.github/workflows/release.yml` directly encodes these gates, including both the MSRV and stable Rust compiler lanes, Docker and Podman qualification, the full seven-case corpus, and deterministic Linux packaging. Stable release qualification reruns the complete workflow against the exact `1.0.0` tree with the committed lockfile.
 
 ## Supply-chain pinning
 
@@ -56,6 +56,6 @@ For the 1.0 line:
 
 JSON output should be preferred by automation. Exit status is deliberately coarse and does not replace the structured report status.
 
-## Current sandbox qualification boundary
+## Qualification evidence
 
-The Phase 21 construction sandbox has no usable Rust toolchain, Docker, or Podman, and outbound DNS is unavailable. Source-policy checks can run here; compiler and container gates cannot. This is why the result is a release **candidate**. A future report may call it stable `1.0.0` only after the external workflow evidence exists for the exact promoted tree.
+The authoritative release evidence is produced by GitHub Actions against the exact candidate commit. A local or restricted construction environment may perform source-policy checks, but it is not treated as a substitute for the compiler, Docker, Podman, real-world corpus, and packaging jobs encoded in the release workflow.

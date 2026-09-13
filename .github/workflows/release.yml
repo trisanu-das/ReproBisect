@@ -89,12 +89,12 @@ jobs:
           toolchain: 1.85.1
       - run: cargo build --locked --release
       - name: Verify binary version
-        run: test "$(target/release/reprobisect --version)" = "reprobisect 1.0.0-rc.1"
+        run: test "$(target/release/reprobisect --version)" = "reprobisect 1.0.0"
       - name: Build deterministic Linux bundle
         shell: bash
         run: |
           set -euo pipefail
-          version="1.0.0-rc.1"
+          version="1.0.0"
           root="reprobisect-${version}-x86_64-unknown-linux-gnu"
           mkdir -p "dist/${root}"
           install -m 0755 target/release/reprobisect "dist/${root}/reprobisect"
@@ -105,8 +105,8 @@ jobs:
           (cd dist && sha256sum "${root}.tar.gz" > SHA256SUMS)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: reprobisect-1.0.0-rc.1-linux-x86_64
+          name: reprobisect-1.0.0-linux-x86_64
           path: |
-            dist/reprobisect-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz
+            dist/reprobisect-1.0.0-x86_64-unknown-linux-gnu.tar.gz
             dist/SHA256SUMS
           if-no-files-found: error

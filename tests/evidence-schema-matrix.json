@@ -121,7 +121,7 @@
   },
   {
     "phase": 21,
-    "crate_version": "1.0.0-rc.1",
+    "crate_version": "1.0.0",
     "check_report": 14,
     "build_evidence": 10,
     "fix_report": 12,

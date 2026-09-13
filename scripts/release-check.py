@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = "1.0.0-rc.1"
+EXPECTED_VERSION = "1.0.0"
 EXPECTED_RUST_VERSION = "1.85"
 EXPECTED_TOOLCHAIN = "1.85.1"
 EXPECTED_SCHEMAS = {
@@ -69,7 +69,7 @@ def check_package() -> list[str]:
     if package.get("rust-version") != EXPECTED_RUST_VERSION:
         raise RuntimeError(f"Cargo.toml rust-version must remain {EXPECTED_RUST_VERSION}")
     if package.get("publish") is not False:
-        raise RuntimeError("release candidate must remain publish = false until crates.io policy is decided")
+        raise RuntimeError("stable release must remain publish = false until crates.io policy is decided")
 
     toolchain = tomllib.loads((ROOT / "rust-toolchain.toml").read_text(encoding="utf-8"))
     if toolchain.get("toolchain", {}).get("channel") != EXPECTED_TOOLCHAIN:
@@ -95,7 +95,7 @@ def check_schemas() -> list[str]:
     for name, value in EXPECTED_SCHEMAS.items():
         if found.get(name) != value:
             raise RuntimeError(f"schema freeze violation: {name}={found.get(name)!r}, expected {value}")
-    return ["persisted evidence schema ranges are frozen for the 1.0 release candidate"]
+    return ["persisted evidence schema ranges are frozen for the 1.0 stable line"]
 
 
 def check_action_pins() -> list[str]:
