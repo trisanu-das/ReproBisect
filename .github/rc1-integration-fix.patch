@@ -1,121 +1,52 @@
-diff --git a/corpus/real-world/byteorder-rustc-build-path/reprobisect.toml b/corpus/real-world/byteorder-rustc-build-path/reprobisect.toml
-index f6766e3..698b922 100644
---- a/corpus/real-world/byteorder-rustc-build-path/reprobisect.toml
-+++ b/corpus/real-world/byteorder-rustc-build-path/reprobisect.toml
-@@ -1,6 +1,6 @@
- [build]
- runner = "docker"
--image = "rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
-+image = "rust@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa"
- command = ["sh", "-lc", "rustc --crate-name byteorder --crate-type lib -g --emit=obj src/lib.rs -o byteorder.o"]
- outputs = ["byteorder.o"]
- timeout_seconds = 180
-diff --git a/src/runner/oci.rs b/src/runner/oci.rs
-index ab81f05..84a1175 100644
---- a/src/runner/oci.rs
-+++ b/src/runner/oci.rs
-@@ -38,6 +38,21 @@ struct CapturedStream {
-     truncated: bool,
- }
+diff --git a/scripts/test-fixtures.sh b/scripts/test-fixtures.sh
+--- a/scripts/test-fixtures.sh
++++ b/scripts/test-fixtures.sh
+@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ BIN="${ROOT}/target/debug/reprobisect"
  
-+fn host_owner(path: &Path) -> Result<String> {
-+    #[cfg(unix)]
-+    {
-+        use std::os::unix::fs::MetadataExt;
-+        let metadata = fs::metadata(path)
-+            .with_context(|| format!("cannot stat host workspace owner {}", path.display()))?;
-+        Ok(format!("{}:{}", metadata.uid(), metadata.gid()))
-+    }
-+    #[cfg(not(unix))]
-+    {
-+        let _ = path;
-+        Ok(String::new())
-+    }
-+}
-+
- fn drain_bounded_stream<R: Read>(mut reader: R, max_bytes: u64) -> std::io::Result<CapturedStream> {
-     let retain_limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-     let mut retained = Vec::with_capacity(retain_limit.min(64 * 1024));
-@@ -469,7 +484,9 @@ dependency_spec="${11}"
- dependency_enabled="${12}"
- dependency_max_files="${13}"
- dependency_max_bytes="${14}"
--shift 14
-+restore_owner="${15}"
-+restore_root="${16}"
-+shift 16
- if [ -n "$umask_value" ]; then
-   umask "$umask_value"
- fi
-@@ -610,6 +627,13 @@ fi
- if [ "$dependency_enabled" = "1" ] && [ "$dependency_tools_available" = "1" ]; then
-   summarize_all_caches "$dependency_after"
- fi
-+# Rootful Docker writes bind-mounted files as container root. A restrictive
-+# controlled umask can therefore make otherwise valid artifacts unreadable to
-+# the host runner. Hand ownership back after the build without changing modes
-+# or bytes, so the observed umask effect remains intact.
-+if [ -n "$restore_owner" ] && [ -n "$restore_root" ]; then
-+  chown -R "$restore_owner" "$restore_root" /reprobisect-meta >/dev/null 2>&1 || true
-+fi
- exit "$command_status"
- "#;
-             let toolchain_probe = "/reprobisect-meta/toolchain-bindings.tsv".to_string();
-@@ -642,6 +666,12 @@ exit "$command_status"
-                 if environment.runtime_dependency_provenance { "1" } else { "0" }.to_string(),
-                 environment.dependency_cache_max_files.to_string(),
-                 environment.dependency_cache_max_bytes.to_string(),
-+                if matches!(self.backend, RunnerBackend::Docker) && environment.umask.is_some() {
-+                    host_owner(workspace)?
-+                } else {
-+                    String::new()
-+                },
-+                environment.container_source_path.clone(),
-             ]);
-         }
-         args.extend(command.iter().cloned());
-@@ -2188,6 +2218,44 @@ mod tests {
-         assert!(args.windows(2).any(|pair| pair[0] == "--cap-add" && pair[1] == "SYS_PTRACE"));
-     }
+-cargo build --manifest-path "${ROOT}/Cargo.toml"
++cargo build --locked --manifest-path "${ROOT}/Cargo.toml"
  
-+    #[test]
-+    fn docker_umask_wrapper_hands_workspace_ownership_back_to_host() {
-+        let project = tempfile::tempdir().unwrap();
-+        let workspace = tempfile::tempdir().unwrap();
-+        let metadata = tempfile::tempdir().unwrap();
-+        let runner = OciRunner::new(project.path().to_path_buf(), RunnerBackend::Docker);
-+        let spec = BuildSpec {
-+            image: "debian:bookworm".into(),
-+            command: vec!["true".into()],
-+            outputs: vec![PathBuf::from("out")],
-+            environment: BTreeMap::new(),
-+            working_directory: PathBuf::from("."),
-+            timeout_seconds: 60,
-+            log_capture_max_bytes: 1024 * 1024,
-+        };
-+        let environment = ControlledEnvironment {
-+            umask: Some(0o077),
-+            ..ControlledEnvironment::default()
-+        };
-+        let command = vec!["true".to_string()];
-+        let args = runner
-+            .runtime_args(
-+                &spec,
-+                workspace.path(),
-+                metadata.path(),
-+                &environment,
-+                &BTreeMap::new(),
-+                "sha256:demo",
-+                "reprobisect-test",
-+                &command,
-+            )
-+            .unwrap();
-+        let owner = host_owner(workspace.path()).unwrap();
-+        assert!(args.iter().any(|arg| arg == &owner));
-+        assert!(args.iter().any(|arg| arg == &environment.container_source_path));
-+        assert!(args.iter().any(|arg| arg.contains("chown -R")));
-+    }
+ cleanup_fixture() {
+   rm -rf "${ROOT}/fixtures/$1/.reprobisect"
+diff --git a/scripts/test-podman.sh b/scripts/test-podman.sh
+--- a/scripts/test-podman.sh
++++ b/scripts/test-podman.sh
+@@ -17,7 +17,7 @@ path.write_text(text)
+ output="$tmp/report.json"
+ (
+   cd "$repo_root"
+-  cargo run --quiet -- check "$tmp" --format json > "$output"
++  cargo run --locked --quiet -- check "$tmp" --format json > "$output"
+ )
+ python3 - "$output" <<'PY'
+ import json, sys
+diff --git a/scripts/release-check.py b/scripts/release-check.py
+--- a/scripts/release-check.py
++++ b/scripts/release-check.py
+@@ -63,6 +63,16 @@ def check_package() -> list[str]:
+     if toolchain.get("toolchain", {}).get("channel") != EXPECTED_TOOLCHAIN:
+         raise RuntimeError(f"rust-toolchain.toml must pin {EXPECTED_TOOLCHAIN}")
 +
-     #[test]
-     fn parses_redacted_network_trace_summary() {
-         let temp = tempfile::tempdir().unwrap();
++    lock_path = ROOT / "Cargo.lock"
++    if not lock_path.is_file():
++        raise RuntimeError("Cargo.lock must be committed for the stable release line")
++    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
++    root_packages = [
++        package for package in lock.get("package", []) if package.get("name") == "reprobisect"
++    ]
++    if len(root_packages) != 1 or root_packages[0].get("version") != EXPECTED_VERSION:
++        raise RuntimeError(f"Cargo.lock must contain reprobisect {EXPECTED_VERSION}")
++    notes.append("Cargo.lock is committed and matches the package version")
+     notes.append(f"package={EXPECTED_VERSION}; msrv={EXPECTED_RUST_VERSION}; default_toolchain={EXPECTED_TOOLCHAIN}")
+     return notes
+@@ -130,8 +140,8 @@ def rust_checks(require_rust: bool) -> tuple[list[str], list[dict[str, Any]]]:
+     commands = [
+         run([rustc, "--version"]),
+         run([cargo, "--version"]),
+-        run([cargo, "check", "--all-targets"]),
+-        run([cargo, "test", "--all-targets"]),
++        run([cargo, "check", "--locked", "--all-targets"]),
++        run([cargo, "test", "--locked", "--all-targets"]),
+     ]
+     return ["Rust compiler and all-target unit gates passed"], commands
