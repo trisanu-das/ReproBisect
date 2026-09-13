@@ -1,7 +1,7 @@
 [build]
 runner = "docker"
 image = "rust@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa"
-command = ["sh", "-lc", "rustc --crate-name byteorder --crate-type lib -g --emit=obj src/lib.rs -o byteorder.o"]
+command = ["rustc", "--crate-name", "byteorder", "--crate-type", "lib", "-g", "--emit=obj", "src/lib.rs", "-o", "byteorder.o"]
 outputs = ["byteorder.o"]
 timeout_seconds = 180
 
