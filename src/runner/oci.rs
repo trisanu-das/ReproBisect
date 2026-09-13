@@ -38,6 +38,21 @@ struct CapturedStream {
     truncated: bool,
 }
 
+fn host_owner(path: &Path) -> Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path)
+            .with_context(|| format!("cannot stat host workspace owner {}", path.display()))?;
+        Ok(format!("{}:{}", metadata.uid(), metadata.gid()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(String::new())
+    }
+}
+
 fn drain_bounded_stream<R: Read>(mut reader: R, max_bytes: u64) -> std::io::Result<CapturedStream> {
     let retain_limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
     let mut retained = Vec::with_capacity(retain_limit.min(64 * 1024));
@@ -469,7 +484,9 @@ dependency_spec="${11}"
 dependency_enabled="${12}"
 dependency_max_files="${13}"
 dependency_max_bytes="${14}"
-shift 14
+restore_owner="${15}"
+restore_root="${16}"
+shift 16
 if [ -n "$umask_value" ]; then
   umask "$umask_value"
 fi
@@ -610,6 +627,13 @@ fi
 if [ "$dependency_enabled" = "1" ] && [ "$dependency_tools_available" = "1" ]; then
   summarize_all_caches "$dependency_after"
 fi
+# Rootful Docker writes bind-mounted files as container root. A restrictive
+# controlled umask can therefore make otherwise valid artifacts unreadable to
+# the host runner. Hand ownership back after the build without changing modes
+# or bytes, so the observed umask effect remains intact.
+if [ -n "$restore_owner" ] && [ -n "$restore_root" ]; then
+  chown -R "$restore_owner" "$restore_root" /reprobisect-meta >/dev/null 2>&1 || true
+fi
 exit "$command_status"
 "#;
             let toolchain_probe = "/reprobisect-meta/toolchain-bindings.tsv".to_string();
@@ -642,6 +666,12 @@ exit "$command_status"
                 if environment.runtime_dependency_provenance { "1" } else { "0" }.to_string(),
                 environment.dependency_cache_max_files.to_string(),
                 environment.dependency_cache_max_bytes.to_string(),
+                if matches!(self.backend, RunnerBackend::Docker) && environment.umask.is_some() {
+                    host_owner(workspace)?
+                } else {
+                    String::new()
+                },
+                environment.container_source_path.clone(),
             ]);
         }
         args.extend(command.iter().cloned());
@@ -2186,6 +2216,44 @@ mod tests {
             )
             .unwrap();
         assert!(args.windows(2).any(|pair| pair[0] == "--cap-add" && pair[1] == "SYS_PTRACE"));
+    }
+
+    #[test]
+    fn docker_umask_wrapper_hands_workspace_ownership_back_to_host() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let metadata = tempfile::tempdir().unwrap();
+        let runner = OciRunner::new(project.path().to_path_buf(), RunnerBackend::Docker);
+        let spec = BuildSpec {
+            image: "debian:bookworm".into(),
+            command: vec!["true".into()],
+            outputs: vec![PathBuf::from("out")],
+            environment: BTreeMap::new(),
+            working_directory: PathBuf::from("."),
+            timeout_seconds: 60,
+            log_capture_max_bytes: 1024 * 1024,
+        };
+        let environment = ControlledEnvironment {
+            umask: Some(0o077),
+            ..ControlledEnvironment::default()
+        };
+        let command = vec!["true".to_string()];
+        let args = runner
+            .runtime_args(
+                &spec,
+                workspace.path(),
+                metadata.path(),
+                &environment,
+                &BTreeMap::new(),
+                "sha256:demo",
+                "reprobisect-test",
+                &command,
+            )
+            .unwrap();
+        let owner = host_owner(workspace.path()).unwrap();
+        assert!(args.iter().any(|arg| arg == &owner));
+        assert!(args.iter().any(|arg| arg == &environment.container_source_path));
+        assert!(args.iter().any(|arg| arg.contains("chown -R")));
     }
 
     #[test]
