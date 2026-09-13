@@ -16,45 +16,30 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - name: Enforce Cargo.lock in local gates
+      - name: Require Cargo.lock in source policy
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          replacements = {
-              "scripts/test-fixtures.sh": [
-                  ('cargo build --manifest-path "${ROOT}/Cargo.toml"', 'cargo build --locked --manifest-path "${ROOT}/Cargo.toml"'),
-              ],
-              "scripts/test-podman.sh": [
-                  ('cargo run --quiet -- check "$tmp" --format json > "$output"', 'cargo run --locked --quiet -- check "$tmp" --format json > "$output"'),
-              ],
-              "scripts/release-check.py": [
-                  ('        run([cargo, "check", "--all-targets"]),', '        run([cargo, "check", "--locked", "--all-targets"]),'),
-                  ('        run([cargo, "test", "--all-targets"]),', '        run([cargo, "test", "--locked", "--all-targets"]),'),
-              ],
-          }
-
-          for name, pairs in replacements.items():
-              path = Path(name)
-              text = path.read_text(encoding="utf-8")
-              for old, new in pairs:
-                  if new in text and old not in text:
-                      continue
-                  count = text.count(old)
-                  if count != 1:
-                      raise SystemExit(f"{name}: expected exactly one match for {old!r}, found {count}")
-                  text = text.replace(old, new, 1)
-              path.write_text(text, encoding="utf-8")
+          path = Path("scripts/release-check.py")
+          text = path.read_text(encoding="utf-8")
+          anchor = '''    if toolchain.get("toolchain", {}).get("channel") != EXPECTED_TOOLCHAIN:\n        raise RuntimeError(f"rust-toolchain.toml must pin {EXPECTED_TOOLCHAIN}")\n    notes.append(f"package={EXPECTED_VERSION}; msrv={EXPECTED_RUST_VERSION}; default_toolchain={EXPECTED_TOOLCHAIN}")\n'''
+          replacement = '''    if toolchain.get("toolchain", {}).get("channel") != EXPECTED_TOOLCHAIN:\n        raise RuntimeError(f"rust-toolchain.toml must pin {EXPECTED_TOOLCHAIN}")\n\n    lock_path = ROOT / "Cargo.lock"\n    if not lock_path.is_file():\n        raise RuntimeError("Cargo.lock must be committed for the stable release line")\n    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))\n    root_packages = [\n        package for package in lock.get("package", []) if package.get("name") == "reprobisect"\n    ]\n    if len(root_packages) != 1 or root_packages[0].get("version") != EXPECTED_VERSION:\n        raise RuntimeError(f"Cargo.lock must contain reprobisect {EXPECTED_VERSION}")\n    notes.append("Cargo.lock is committed and matches the package version")\n    notes.append(f"package={EXPECTED_VERSION}; msrv={EXPECTED_RUST_VERSION}; default_toolchain={EXPECTED_TOOLCHAIN}")\n'''
+          if replacement in text:
+              raise SystemExit(0)
+          if text.count(anchor) != 1:
+              raise SystemExit(f"release-check anchor count={text.count(anchor)}")
+          path.write_text(text.replace(anchor, replacement, 1), encoding="utf-8")
           PY
           git diff --check
-          git add scripts/test-fixtures.sh scripts/test-podman.sh scripts/release-check.py
+          git add scripts/release-check.py
           if git diff --cached --quiet; then
-            echo "lock hardening already present"
+            echo "Cargo.lock source-policy check already present"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Enforce Cargo.lock in local release gates"
+          git commit -m "Require Cargo.lock in release source policy"
           git push origin HEAD:phase21-rc1
