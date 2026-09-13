@@ -1,0 +1,4 @@
+name = "environment-compare-failure"
+expected_status = "minimized"
+expected_minimal_variables = ["environment:A", "environment:B"]
+expected_bad_exit_code = 37

@@ -1,0 +1,24 @@
+[build]
+image = "gcc:14"
+command = ["sh", "-lc", "make"]
+outputs = ["build/app"]
+
+[build.env]
+CFLAGS = "-g -O0"
+
+[experiments]
+control_runs = 2
+intervention_runs = 2
+confirmation_runs = 1
+
+[experiments.dimensions]
+source_path = false
+build_path = true
+source_date_epoch = false
+timezone = false
+locale = false
+hostname = false
+source_mtime = false
+cpu_count = false
+umask = false
+directory_order = false

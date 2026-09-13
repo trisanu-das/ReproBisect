@@ -1,0 +1,15 @@
+schema_version = 1
+id = "cjson-debug-build-path"
+tier = "smoke"
+description = "cJSON 1.7.18 compiled with debug information; changing only the build path should alter ELF debug provenance."
+repository = "https://github.com/DaveGamble/cJSON.git"
+commit = "acc76239bee01d8e9c858ae2cab296704e52d916"
+upstream_ref = "v1.7.18"
+config = "reprobisect.toml"
+expected_status = "non_reproducible"
+expected_causal_variables = ["build_path"]
+max_seconds = 300
+references = [
+  "https://reproducible-builds.org/docs/build-path/",
+  "https://github.com/DaveGamble/cJSON/tree/v1.7.18",
+]

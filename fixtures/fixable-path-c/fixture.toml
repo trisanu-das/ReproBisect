@@ -1,0 +1,5 @@
+name = "fixable-path-c"
+expected_status = "non_reproducible"
+expected_cause = "build_path"
+expected_fix = "build-path-prefix-map"
+expected_fix_verified = true

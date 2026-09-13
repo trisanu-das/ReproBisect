@@ -1,0 +1,14 @@
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "reprobisect fixture ar-b"
+  exit 0
+fi
+ar "$@" || exit $?
+archive="${2:-}"
+[ -n "$archive" ] || exit 64
+marker=/tmp/reprobisect_ar_variant_marker
+printf 'variant-b\n' > "$marker"
+ar r "$archive" "$marker" >/dev/null 2>&1
+status=$?
+rm -f "$marker"
+exit "$status"

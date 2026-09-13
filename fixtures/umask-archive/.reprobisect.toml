@@ -1,0 +1,21 @@
+[build]
+image = "debian:bookworm"
+command = ["sh", "-lc", "mkdir -p build generated && printf x > generated/payload && touch -d @946684800 generated/payload && tar -cf build/out.tar generated/payload"]
+outputs = ["build/out.tar"]
+
+[experiments]
+control_runs = 2
+intervention_runs = 2
+confirmation_runs = 1
+
+[experiments.dimensions]
+source_path = false
+build_path = false
+source_date_epoch = false
+timezone = false
+locale = false
+hostname = false
+source_mtime = false
+cpu_count = false
+umask = true
+directory_order = false

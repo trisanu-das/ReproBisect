@@ -1,0 +1,21 @@
+[build]
+image = "python:3.13-slim"
+command = ["python3", "build.py"]
+outputs = ["out.txt"]
+log_capture_max_bytes = 65536
+
+[experiments]
+control_runs = 2
+
+[experiments.dimensions]
+network_access = false
+source_path = false
+build_path = false
+source_date_epoch = false
+timezone = false
+locale = false
+hostname = false
+source_mtime = false
+cpu_count = false
+umask = false
+directory_order = false

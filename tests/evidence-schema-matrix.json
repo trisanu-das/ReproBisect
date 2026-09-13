@@ -1,0 +1,130 @@
+[
+  {
+    "phase": 6,
+    "crate_version": "0.1.0-alpha.5",
+    "check_report": 5,
+    "build_evidence": 1,
+    "fix_report": 2,
+    "environment_comparison": null
+  },
+  {
+    "phase": 7,
+    "crate_version": "0.1.0-alpha.6",
+    "check_report": 6,
+    "build_evidence": 2,
+    "fix_report": 3,
+    "environment_comparison": null
+  },
+  {
+    "phase": 8,
+    "crate_version": "0.1.0-alpha.7",
+    "check_report": 6,
+    "build_evidence": 3,
+    "fix_report": 4,
+    "environment_comparison": null
+  },
+  {
+    "phase": 9,
+    "crate_version": "0.1.0-alpha.8",
+    "check_report": 7,
+    "build_evidence": 4,
+    "fix_report": 5,
+    "environment_comparison": null
+  },
+  {
+    "phase": 10,
+    "crate_version": "0.1.0-alpha.9",
+    "check_report": 8,
+    "build_evidence": 5,
+    "fix_report": 6,
+    "environment_comparison": null
+  },
+  {
+    "phase": 11,
+    "crate_version": "0.1.0-alpha.10",
+    "check_report": 9,
+    "build_evidence": 6,
+    "fix_report": 7,
+    "environment_comparison": null
+  },
+  {
+    "phase": 12,
+    "crate_version": "0.1.0-alpha.11",
+    "check_report": 10,
+    "build_evidence": 7,
+    "fix_report": 8,
+    "environment_comparison": null
+  },
+  {
+    "phase": 13,
+    "crate_version": "0.1.0-alpha.12",
+    "check_report": 11,
+    "build_evidence": 8,
+    "fix_report": 9,
+    "environment_comparison": null
+  },
+  {
+    "phase": 14,
+    "crate_version": "0.1.0-alpha.13",
+    "check_report": 11,
+    "build_evidence": 8,
+    "fix_report": 9,
+    "environment_comparison": 1
+  },
+  {
+    "phase": 15,
+    "crate_version": "0.1.0-alpha.14",
+    "check_report": 12,
+    "build_evidence": 8,
+    "fix_report": 10,
+    "environment_comparison": 1
+  },
+  {
+    "phase": 16,
+    "crate_version": "0.1.0-alpha.15",
+    "check_report": 12,
+    "build_evidence": 8,
+    "fix_report": 10,
+    "environment_comparison": 2
+  },
+  {
+    "phase": 17,
+    "crate_version": "0.1.0-alpha.16",
+    "check_report": 13,
+    "build_evidence": 9,
+    "fix_report": 11,
+    "environment_comparison": 3
+  },
+  {
+    "phase": 18,
+    "crate_version": "0.1.0-alpha.17",
+    "check_report": 14,
+    "build_evidence": 10,
+    "fix_report": 12,
+    "environment_comparison": 4
+  },
+  {
+    "phase": 19,
+    "crate_version": "0.1.0-alpha.18",
+    "check_report": 14,
+    "build_evidence": 10,
+    "fix_report": 12,
+    "environment_comparison": 4
+  },
+  {
+    "phase": 20,
+    "crate_version": "0.1.0-alpha.19",
+    "check_report": 14,
+    "build_evidence": 10,
+    "fix_report": 12,
+    "environment_comparison": 4
+  },
+  {
+    "phase": 21,
+    "crate_version": "1.0.0-rc.1",
+    "check_report": 14,
+    "build_evidence": 10,
+    "fix_report": 12,
+    "environment_comparison": 4
+  }
+]

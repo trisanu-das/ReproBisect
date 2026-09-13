@@ -1,0 +1,15 @@
+[build]
+image = "gcc:14"
+command = ["sh", "-lc", "mkdir -p build && gcc -g -O0 -o build/app \"$(pwd)/main.c\""]
+outputs = ["build/app"]
+
+[experiments]
+control_runs = 2
+
+[experiments.dimensions]
+build_path = true
+source_date_epoch = false
+timezone = false
+locale = false
+hostname = false
+cpu_count = false

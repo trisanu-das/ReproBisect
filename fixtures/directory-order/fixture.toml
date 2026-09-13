@@ -1,0 +1,4 @@
+name = "directory-order"
+expected_status = "platform_dependent_best_effort"
+expected_cause = "directory_order"
+note = "not CI-gated because inode/readdir behavior is filesystem-dependent"

@@ -1,0 +1,15 @@
+schema_version = 1
+id = "byteorder-rustc-build-path"
+tier = "smoke"
+description = "byteorder 1.5.0 source compiled directly with rustc debug info, exercising Rust ELF path evidence without network dependencies."
+repository = "https://github.com/BurntSushi/byteorder.git"
+commit = "ec068eefa042d494475db125c4b034bd8e9e34dd"
+upstream_ref = "1.5.0"
+config = "reprobisect.toml"
+expected_status = "non_reproducible"
+expected_causal_variables = ["build_path"]
+max_seconds = 300
+references = [
+  "https://reproducible-builds.org/docs/rust/",
+  "https://github.com/BurntSushi/byteorder/tree/1.5.0",
+]

@@ -1,0 +1,4 @@
+name = "locale-output"
+expected_status = "non_reproducible_under_locale_intervention"
+expected_cause = "locale"
+expected_confidence = "medium"

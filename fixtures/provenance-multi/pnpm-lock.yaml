@@ -1,0 +1,4 @@
+lockfileVersion: '9.0'
+packages:
+  alpha@1.2.0:
+    resolution: {integrity: sha512-demo}

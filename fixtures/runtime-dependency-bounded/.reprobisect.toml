@@ -1,0 +1,26 @@
+[build]
+image = "debian:bookworm"
+command = ["sh", "-lc", "mkdir -p build /tmp/reprobisect-bounded-cache; printf one > /tmp/reprobisect-bounded-cache/a; printf two > /tmp/reprobisect-bounded-cache/b; cp payload.txt build/out.txt"]
+outputs = ["build/out.txt"]
+
+[experiments]
+control_runs = 2
+runtime_dependency_provenance = true
+dependency_cache_max_files = 1
+dependency_cache_max_bytes = 1048576
+
+[experiments.dependency_cache_paths]
+bounded = "/tmp/reprobisect-bounded-cache"
+
+[experiments.dimensions]
+network_access = false
+source_path = false
+build_path = false
+source_date_epoch = false
+timezone = false
+locale = false
+hostname = false
+source_mtime = false
+cpu_count = false
+umask = false
+directory_order = false

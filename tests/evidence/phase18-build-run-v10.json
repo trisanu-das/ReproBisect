@@ -1,0 +1,59 @@
+{
+  "schema_version": 10,
+  "experiment_id": "00000000-0000-4000-8000-000000000001",
+  "run_id": "00000000-0000-4000-8000-000000000002",
+  "ordinal": 1,
+  "source_digest": "abc",
+  "image": "example:latest",
+  "resolved_image_id": "sha256:example",
+  "command": [
+    "true"
+  ],
+  "working_directory": ".",
+  "effective_environment": {},
+  "controlled_environment": {
+    "image_override": null,
+    "container_source_path": "/src",
+    "container_work_path": "/workspace",
+    "source_copy_order": "sorted",
+    "environment": {},
+    "hostname": "reprobisect-control",
+    "cpu_count": null,
+    "source_mtime_epoch": null,
+    "umask": null,
+    "network_mode": "default"
+  },
+  "toolchain_provenance": {
+    "probes": [],
+    "error": null
+  },
+  "exit_code": 0,
+  "duration_ms": 1,
+  "stdout": "legacy stdout\n",
+  "stderr": "legacy stderr\n",
+  "artifacts": [
+    {
+      "logical_path": "out",
+      "sha256": "deadbeef",
+      "size_bytes": 1,
+      "detected_type": "generic",
+      "embedded_markers": [],
+      "elf_debug_markers": [],
+      "elf_marker_locations": [],
+      "elf_metadata": null,
+      "archive_metadata": null
+    }
+  ],
+  "runner_backend": "docker",
+  "source_overrides": [],
+  "network_trace": {},
+  "process_trace": {},
+  "runtime_dependency_provenance": {},
+  "log_capture_max_bytes": 1048576,
+  "stdout_sha256": "8e3ea57ec9da4c55ea991637eee33d1545bdfff0a88d28954942f5d6977175c3",
+  "stderr_sha256": "45bc65786da5d596e329fda7a8bca5aa8a462e44de90d2e9a36e8a06a417b84f",
+  "stdout_bytes": 14,
+  "stderr_bytes": 14,
+  "stdout_truncated": false,
+  "stderr_truncated": false
+}

@@ -1,0 +1,3 @@
+name = "runtime-dependency-bounded"
+expected_status = "reproducible"
+expected_cache_complete = false

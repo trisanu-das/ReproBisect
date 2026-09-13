@@ -1,0 +1,15 @@
+schema_version = 1
+id = "tinyxml2-debug-build-path"
+tier = "smoke"
+description = "tinyxml2 10.0.0 compiled with debug information; build-directory variance should be localized to debug provenance."
+repository = "https://github.com/leethomason/tinyxml2.git"
+commit = "321ea883b7190d4e85cae5512a12e5eaa8f8731f"
+upstream_ref = "10.0.0"
+config = "reprobisect.toml"
+expected_status = "non_reproducible"
+expected_causal_variables = ["build_path"]
+max_seconds = 300
+references = [
+  "https://reproducible-builds.org/docs/build-path/",
+  "https://github.com/leethomason/tinyxml2/tree/10.0.0",
+]

@@ -1,0 +1,22 @@
+[build]
+image = "alpine:3.20.10"
+command = ["sh", "-lc", "mkdir -p build; if [ -e /sys/class/net/eth0 ]; then printf 'network-interface-present\\n' > build/out.txt; else exit 42; fi"]
+outputs = ["build/out.txt"]
+
+[experiments]
+control_runs = 2
+intervention_runs = 2
+confirmation_runs = 1
+
+[experiments.dimensions]
+network_access = true
+source_path = false
+build_path = false
+source_date_epoch = false
+timezone = false
+locale = false
+hostname = false
+source_mtime = false
+cpu_count = false
+umask = false
+directory_order = false

@@ -1,0 +1,4 @@
+name = "absolute-path-c"
+expected_status = "non_reproducible_under_source_path_intervention"
+expected_cause = "build_path"
+expected_remediation = "-ffile-prefix-map / -fdebug-prefix-map"

@@ -1,0 +1,4 @@
+name = "archive-mtime"
+expected_status = "non_reproducible"
+expected_cause = "source_mtime"
+expected_structural_field = "mtime"

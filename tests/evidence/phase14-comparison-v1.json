@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "experiment_id": "00000000-0000-4000-8000-000000000021",
+  "status": "equivalent",
+  "source_digest": "phase14",
+  "source_provenance": {
+    "git_commit": null,
+    "git_dirty": null,
+    "dependency_files": [],
+    "dependency_resolutions": []
+  },
+  "good_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bad_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "good_runs": [],
+  "bad_runs": [],
+  "artifact_deltas": [],
+  "delta": [],
+  "minimal_delta": [],
+  "tested_subsets": 0,
+  "reproduction_runs": [],
+  "reverted_to_good": null,
+  "confirmation_run": null,
+  "notes": ["phase 14 comparison compatibility fixture"]
+}

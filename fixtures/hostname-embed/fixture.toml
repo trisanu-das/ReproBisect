@@ -1,0 +1,4 @@
+name = "hostname-embed"
+expected_status = "non_reproducible_under_hostname_intervention"
+expected_cause = "hostname"
+expected_confidence = "high"

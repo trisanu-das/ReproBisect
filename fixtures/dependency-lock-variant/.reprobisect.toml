@@ -1,0 +1,27 @@
+[build]
+image = "debian:bookworm"
+command = ["sh", "-lc", "mkdir -p build && cp requirements.txt build/out.txt"]
+outputs = ["build/out.txt"]
+
+[experiments]
+control_runs = 2
+intervention_runs = 2
+confirmation_runs = 1
+
+[[experiments.dependency_variants]]
+id = "demo-version"
+target = "requirements.txt"
+variant_file = "requirements.variant.txt"
+
+[experiments.dimensions]
+network_access = false
+source_path = false
+build_path = false
+source_date_epoch = false
+timezone = false
+locale = false
+hostname = false
+source_mtime = false
+cpu_count = false
+umask = false
+directory_order = false

@@ -1,0 +1,24 @@
+[build]
+image = "gcc:14"
+command = ["sh", "-lc", "mkdir -p build /tmp/reprobisect-demo-cache; printf 'downloaded-content-v1' > /tmp/reprobisect-demo-cache/blob; cp requirements.txt build/out.txt"]
+outputs = ["build/out.txt"]
+
+[experiments]
+control_runs = 2
+runtime_dependency_provenance = true
+
+[experiments.dependency_cache_paths]
+demo = "/tmp/reprobisect-demo-cache"
+
+[experiments.dimensions]
+network_access = false
+source_path = false
+build_path = false
+source_date_epoch = false
+timezone = false
+locale = false
+hostname = false
+source_mtime = false
+cpu_count = false
+umask = false
+directory_order = false

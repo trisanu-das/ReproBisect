@@ -1,0 +1,15 @@
+[build]
+image = "gcc:14"
+command = ["sh", "-lc", "mkdir -p build && date -d '@946684800' '+%Y-%m-%d %H:%M:%S %Z' > build/result.txt"]
+outputs = ["build/result.txt"]
+
+[experiments]
+control_runs = 2
+
+[experiments.dimensions]
+build_path = false
+source_date_epoch = false
+timezone = true
+locale = false
+hostname = false
+cpu_count = false

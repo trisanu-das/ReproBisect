@@ -1,0 +1,4 @@
+name = "build-image"
+expected_status = "non_reproducible_under_build_image_intervention"
+expected_cause = "build_image"
+expected_evidence = "container-image change alters /etc/alpine-release; diagnosis remains coarse because image changes many inputs"

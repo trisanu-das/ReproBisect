@@ -1,0 +1,4 @@
+name = "environment-leak"
+expected_status = "non_reproducible_under_environment_intervention"
+expected_cause = "environment_variable"
+variable = "BUILD_FLAVOR"

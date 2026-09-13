@@ -1,0 +1,23 @@
+[build]
+image = "rust:1.85-bookworm"
+command = ["cargo", "build"]
+outputs = ["target/debug/fixable-path-cargo"]
+timeout_seconds = 900
+
+[experiments]
+control_runs = 2
+intervention_runs = 2
+confirmation_runs = 1
+
+[experiments.dimensions]
+network_access = false
+source_path = false
+build_path = true
+source_date_epoch = false
+timezone = false
+locale = false
+hostname = false
+source_mtime = false
+cpu_count = false
+umask = false
+directory_order = false

@@ -1,0 +1,4 @@
+name = "timezone-output"
+expected_status = "non_reproducible_under_timezone_intervention"
+expected_cause = "TZ"
+expected_confidence = "medium"

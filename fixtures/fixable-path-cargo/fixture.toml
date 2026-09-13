@@ -1,0 +1,4 @@
+name = "fixable-path-cargo"
+expected_status = "non_reproducible"
+expected_cause = "build_path"
+expected_fix = "compiler-prefix-map"

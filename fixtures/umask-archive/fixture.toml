@@ -1,0 +1,4 @@
+name = "umask-archive"
+expected_status = "non_reproducible"
+expected_cause = "umask"
+expected_structural_field = "mode"

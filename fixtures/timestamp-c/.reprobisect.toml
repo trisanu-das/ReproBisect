@@ -1,0 +1,15 @@
+[build]
+image = "gcc:14"
+command = ["sh", "-lc", "make clean && sleep 2 && make"]
+outputs = ["build/app"]
+
+[experiments]
+control_runs = 2
+
+[experiments.dimensions]
+build_path = false
+source_date_epoch = true
+timezone = false
+locale = false
+hostname = false
+cpu_count = false

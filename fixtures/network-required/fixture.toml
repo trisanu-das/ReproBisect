@@ -1,0 +1,4 @@
+name = "network-required"
+expected_status = "inconclusive_offline_reproducibility_with_network_dependency"
+expected_cause = "network_access"
+expected_evidence = "build succeeds with default Docker networking exposes eth0 and the build exits 42 with --network none"

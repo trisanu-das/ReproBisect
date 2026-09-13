@@ -1,0 +1,23 @@
+[build]
+runner = "docker"
+image = "reprobisect-corpus/opensbi-riscv64:phase21"
+command = ["sh", "-lc", "make -j1 PLATFORM=generic CROSS_COMPILE=riscv64-linux-gnu-"]
+outputs = ["build/platform/generic/firmware/fw_dynamic.elf"]
+timeout_seconds = 600
+
+[experiments]
+control_runs = 2
+intervention_runs = 1
+confirmation_runs = 1
+
+[experiments.dimensions]
+build_path = true
+source_path = false
+source_date_epoch = false
+source_mtime = false
+timezone = false
+locale = false
+hostname = false
+cpu_count = false
+umask = false
+directory_order = false

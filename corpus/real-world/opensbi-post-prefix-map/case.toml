@@ -1,0 +1,16 @@
+schema_version = 1
+id = "opensbi-post-prefix-map"
+tier = "extended"
+description = "OpenSBI at the upstream reproducibility commit with REPRODUCIBLE=y, serving as the fixed counterpart to the pre-fix case."
+repository = "https://github.com/riscv-software-src/opensbi.git"
+commit = "6d23a9c5707de7243c0b3423724c0e4f3e1ee40d"
+upstream_ref = "6d23a9c5707de7243c0b3423724c0e4f3e1ee40d"
+config = "reprobisect.toml"
+expected_status = "reproducible"
+expected_causal_variables = []
+max_seconds = 900
+helper_dockerfile = "opensbi-riscv64.Dockerfile"
+helper_image = "reprobisect-corpus/opensbi-riscv64:phase21"
+references = [
+  "https://github.com/riscv-software-src/opensbi/commit/6d23a9c5707de7243c0b3423724c0e4f3e1ee40d",
+]

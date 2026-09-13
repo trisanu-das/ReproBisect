@@ -1,0 +1,17 @@
+schema_version = 1
+id = "opensbi-pre-prefix-map"
+tier = "extended"
+description = "OpenSBI immediately before its upstream reproducibility flag: debug-enabled firmware should remain build-path-sensitive."
+repository = "https://github.com/riscv-software-src/opensbi.git"
+commit = "66ab965e54017292d530033ffaae127389c45458"
+upstream_ref = "parent-of-6d23a9c5707de7243c0b3423724c0e4f3e1ee40d"
+config = "reprobisect.toml"
+expected_status = "non_reproducible"
+expected_causal_variables = ["build_path"]
+max_seconds = 900
+helper_dockerfile = "opensbi-riscv64.Dockerfile"
+helper_image = "reprobisect-corpus/opensbi-riscv64:phase21"
+references = [
+  "https://github.com/riscv-software-src/opensbi/commit/6d23a9c5707de7243c0b3423724c0e4f3e1ee40d",
+  "https://reproducible-builds.org/docs/build-path/",
+]

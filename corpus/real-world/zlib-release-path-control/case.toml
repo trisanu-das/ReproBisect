@@ -1,0 +1,14 @@
+schema_version = 1
+id = "zlib-release-path-control"
+tier = "smoke"
+description = "zlib 1.3.1 release-style static-library build, used as a real-project negative control for build-path attribution."
+repository = "https://github.com/madler/zlib.git"
+commit = "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"
+upstream_ref = "v1.3.1"
+config = "reprobisect.toml"
+expected_status = "reproducible"
+expected_causal_variables = []
+max_seconds = 300
+references = [
+  "https://github.com/madler/zlib/releases/tag/v1.3.1",
+]

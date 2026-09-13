@@ -1,0 +1,67 @@
+{
+  "schema_version": 3,
+  "experiment_id": "00000000-0000-4000-8000-000000000011",
+  "run_id": "00000000-0000-4000-8000-000000000012",
+  "ordinal": 1,
+  "source_digest": "phase8",
+  "image": "example:latest",
+  "resolved_image_id": "sha256:example",
+  "command": ["true"],
+  "working_directory": ".",
+  "effective_environment": {},
+  "controlled_environment": {
+    "image_override": null,
+    "container_source_path": "/src",
+    "container_work_path": "/workspace",
+    "source_copy_order": "sorted",
+    "environment": {},
+    "toolchain_bindings": {},
+    "source_file_overrides": {},
+    "hostname": "reprobisect-control",
+    "cpu_count": null,
+    "source_mtime_epoch": null,
+    "umask": null,
+    "network_mode": "default",
+    "network_trace": false,
+    "runtime_dependency_provenance": true,
+    "dependency_cache_paths": {}
+  },
+  "toolchain_provenance": {"probes": [], "bindings": [], "error": null},
+  "source_overrides": [],
+  "network_trace": {
+    "attempted": false,
+    "tracer_available": false,
+    "socket_calls": 0,
+    "connect_calls": 0,
+    "successful_connects": 0,
+    "failed_connects": 0,
+    "sendto_calls": 0,
+    "recvfrom_calls": 0,
+    "address_families": [],
+    "endpoint_scopes": {},
+    "error": null
+  },
+  "runtime_dependency_provenance": {
+    "attempted": true,
+    "dependency_files": [],
+    "dependency_resolutions": [],
+    "cache_summaries": [
+      {
+        "ecosystem": "cargo",
+        "before_file_count": 1,
+        "before_total_bytes": 10,
+        "before_aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "after_file_count": 2,
+        "after_total_bytes": 20,
+        "after_aggregate_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "changed_during_build": true
+      }
+    ],
+    "error": null
+  },
+  "exit_code": 0,
+  "duration_ms": 1,
+  "stdout": "phase8 stdout\n",
+  "stderr": "",
+  "artifacts": []
+}

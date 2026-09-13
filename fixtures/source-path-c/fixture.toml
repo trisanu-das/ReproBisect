@@ -1,0 +1,4 @@
+name = "source-path-c"
+expected_status = "non_reproducible"
+expected_cause = "source_path"
+expected_evidence = "ELF debug/source path marker"

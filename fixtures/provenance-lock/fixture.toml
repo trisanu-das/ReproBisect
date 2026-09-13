@@ -1,0 +1,3 @@
+name = "provenance-lock"
+expected_status = "reproducible"
+expected_evidence = "requirements.txt hash plus resolved image/toolchain provenance"

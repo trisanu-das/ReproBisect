@@ -1,0 +1,7 @@
+[build]
+image = "gcc:14"
+command = ["sh", "-lc", "make clean && make"]
+outputs = ["build/app"]
+
+[experiments]
+control_runs = 2

@@ -1,0 +1,3 @@
+name = "environment-compare"
+expected_status = "minimized"
+expected_minimal_variables = ["environment:A", "environment:B"]

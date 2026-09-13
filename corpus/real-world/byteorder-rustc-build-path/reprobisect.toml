@@ -1,0 +1,23 @@
+[build]
+runner = "docker"
+image = "rust@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+command = ["sh", "-lc", "rustc --crate-name byteorder --crate-type lib -g --emit=obj src/lib.rs -o byteorder.o"]
+outputs = ["byteorder.o"]
+timeout_seconds = 180
+
+[experiments]
+control_runs = 2
+intervention_runs = 1
+confirmation_runs = 1
+
+[experiments.dimensions]
+build_path = true
+source_path = false
+source_date_epoch = false
+source_mtime = false
+timezone = false
+locale = false
+hostname = false
+cpu_count = false
+umask = false
+directory_order = false

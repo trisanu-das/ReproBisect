@@ -1,0 +1,39 @@
+{
+  "schema_version": 3,
+  "diagnosis": {
+    "schema_version": 6,
+    "experiment_id": "00000000-0000-4000-8000-000000000001",
+    "status": "reproducible",
+    "source_digest": "abc",
+    "source_provenance": {
+      "git_commit": null,
+      "git_dirty": null,
+      "dependency_files": []
+    },
+    "baseline_environment": {
+      "image_override": null,
+      "container_source_path": "/src",
+      "container_work_path": "/workspace",
+      "source_copy_order": "sorted",
+      "environment": {},
+      "hostname": "reprobisect-control",
+      "cpu_count": null,
+      "source_mtime_epoch": null,
+      "umask": null,
+      "network_mode": "default"
+    },
+    "runs": [],
+    "artifact_comparisons": [],
+    "interventions": [],
+    "interaction_search": null,
+    "diagnoses": [],
+    "notes": [
+      "phase 6 compatibility fixture"
+    ]
+  },
+  "candidates": [],
+  "verifications": [],
+  "notes": [
+    "phase 7 fix compatibility fixture"
+  ]
+}

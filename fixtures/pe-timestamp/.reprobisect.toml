@@ -1,0 +1,22 @@
+[build]
+image = "python:3.13-slim"
+command = ["python3", "build.py"]
+outputs = ["out.exe"]
+
+[experiments]
+control_runs = 2
+intervention_runs = 2
+confirmation_runs = 1
+
+[experiments.dimensions]
+network_access = false
+source_path = false
+build_path = false
+source_date_epoch = true
+timezone = false
+locale = false
+hostname = false
+source_mtime = false
+cpu_count = false
+umask = false
+directory_order = false

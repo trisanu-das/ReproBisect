@@ -1,0 +1,17 @@
+schema_version = 1
+id = "sampleproject-wheel-umask"
+tier = "extended"
+description = "PyPA sampleproject 2.0.0 with wheel 0.34.2, reproducing the documented wheel-permission/umask reproducibility issue."
+repository = "https://github.com/pypa/sampleproject.git"
+commit = "3b0207a3396b634e41af20e82e0c710194d5f5dd"
+upstream_ref = "2.0.0"
+config = "reprobisect.toml"
+expected_status = "non_reproducible"
+expected_causal_variables = ["umask"]
+max_seconds = 600
+helper_dockerfile = "python-wheel-0342.Dockerfile"
+helper_image = "reprobisect-corpus/python-wheel-0342:phase21"
+references = [
+  "https://github.com/pypa/wheel/issues/362",
+  "https://github.com/pypa/sampleproject/commit/3b0207a3396b634e41af20e82e0c710194d5f5dd",
+]

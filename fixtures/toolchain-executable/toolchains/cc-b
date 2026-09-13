@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "reprobisect fixture cc-b"
+  exit 0
+fi
+exec gcc '-DTOOLCHAIN_ID="B"' "$@"

@@ -1,0 +1,4 @@
+name = "timestamp-c"
+expected_status = "non_reproducible_under_source_date_epoch_intervention"
+expected_cause = "SOURCE_DATE_EPOCH"
+expected_evidence = "__DATE__/__TIME__ embedded in executable"

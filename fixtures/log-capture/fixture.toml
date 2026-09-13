@@ -1,0 +1,3 @@
+name = "log-capture"
+expected_status = "reproducible"
+expected_evidence = "stdout/stderr retained text is bounded while full stream digests remain exact"
