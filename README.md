@@ -1,4 +1,4 @@
-# ReproBisect
+# ReproBisect (NOT AI SLOP, TRUST ME)
 
 **Find which environment input actually caused your build to change.**
 
