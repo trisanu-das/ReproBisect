@@ -74,6 +74,17 @@ def check_package() -> list[str]:
     toolchain = tomllib.loads((ROOT / "rust-toolchain.toml").read_text(encoding="utf-8"))
     if toolchain.get("toolchain", {}).get("channel") != EXPECTED_TOOLCHAIN:
         raise RuntimeError(f"rust-toolchain.toml must pin {EXPECTED_TOOLCHAIN}")
+
+    lock_path = ROOT / "Cargo.lock"
+    if not lock_path.is_file():
+        raise RuntimeError("Cargo.lock must be committed for the stable release line")
+    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    root_packages = [
+        package for package in lock.get("package", []) if package.get("name") == "reprobisect"
+    ]
+    if len(root_packages) != 1 or root_packages[0].get("version") != EXPECTED_VERSION:
+        raise RuntimeError(f"Cargo.lock must contain reprobisect {EXPECTED_VERSION}")
+    notes.append("Cargo.lock is committed and matches the package version")
     notes.append(f"package={EXPECTED_VERSION}; msrv={EXPECTED_RUST_VERSION}; default_toolchain={EXPECTED_TOOLCHAIN}")
     return notes
 
