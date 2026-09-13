@@ -1,0 +1,97 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 44dfb4a..30de450 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -33,8 +33,8 @@ jobs:
+       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+         with:
+           toolchain: ${{ matrix.toolchain }}
+-      - run: cargo check --all-targets
+-      - run: cargo test --all-targets
++      - run: cargo +${{ matrix.toolchain }} check --all-targets
++      - run: cargo +${{ matrix.toolchain }} test --all-targets
+ 
+   fixtures:
+     runs-on: ubuntu-latest
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index d653d79..b93c826 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -36,8 +36,8 @@ jobs:
+       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+         with:
+           toolchain: ${{ matrix.toolchain }}
+-      - run: cargo check --all-targets
+-      - run: cargo test --all-targets
++      - run: cargo +${{ matrix.toolchain }} check --all-targets
++      - run: cargo +${{ matrix.toolchain }} test --all-targets
+ 
+   container-qualification:
+     needs: rust-matrix
+diff --git a/src/compat.rs b/src/compat.rs
+index 58aa419..9847c9a 100644
+--- a/src/compat.rs
++++ b/src/compat.rs
+@@ -756,6 +756,13 @@ mod tests {
+     fn phase8_unbounded_cache_summary_gets_explicit_legacy_sentinels() {
+         let mut run = phase6_run();
+         run["schema_version"] = Value::from(3_u64);
++        run["source_overrides"] = json!([]);
++        run["network_trace"] = json!({
++            "attempted": false,
++            "tracer_available": false,
++            "connect_calls": 0,
++            "sendto_calls": 0
++        });
+         run["runtime_dependency_provenance"] = json!({
+             "attempted": true,
+             "dependency_files": [],
+diff --git a/src/runner/oci.rs b/src/runner/oci.rs
+index 235f0ee..ab81f05 100644
+--- a/src/runner/oci.rs
++++ b/src/runner/oci.rs
+@@ -2492,14 +2492,14 @@ mod tests {
+         fs::write(temp.path().join("dependency-status"), "available\n").unwrap();
+         fs::write(
+             temp.path().join("dependency-cache-before.tsv"),
+-            "cargo\t2\t20\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
++            "cargo\t2\t20\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t0\t100\t1000\n",
+         )
+         .unwrap();
+         fs::write(
+             temp.path().join("dependency-cache-after.tsv"),
+             concat!(
+-                "cargo\t3\t30\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+-                "demo\t1\t7\tf2d4517b0e2664ef422e3bda2c0ed892dbec3f63895aebcf740619971ec61642\n",
++                "cargo\t3\t30\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\t0\t100\t1000\n",
++                "demo\t1\t7\tf2d4517b0e2664ef422e3bda2c0ed892dbec3f63895aebcf740619971ec61642\t0\t100\t1000\n",
+             ),
+         )
+         .unwrap();
+diff --git a/tests/evidence/phase18-build-run-v10.json b/tests/evidence/phase18-build-run-v10.json
+index 4d69c66..4702a4e 100644
+--- a/tests/evidence/phase18-build-run-v10.json
++++ b/tests/evidence/phase18-build-run-v10.json
+@@ -46,9 +46,19 @@
+   ],
+   "runner_backend": "docker",
+   "source_overrides": [],
+-  "network_trace": {},
+-  "process_trace": {},
+-  "runtime_dependency_provenance": {},
++  "network_trace": {
++    "attempted": false,
++    "tracer_available": false,
++    "connect_calls": 0,
++    "sendto_calls": 0
++  },
++  "process_trace": {
++    "attempted": false,
++    "tracer_available": false
++  },
++  "runtime_dependency_provenance": {
++    "attempted": false
++  },
+   "log_capture_max_bytes": 1048576,
+   "stdout_sha256": "8e3ea57ec9da4c55ea991637eee33d1545bdfff0a88d28954942f5d6977175c3",
+   "stderr_sha256": "45bc65786da5d596e329fda7a8bca5aa8a462e44de90d2e9a36e8a06a417b84f",
