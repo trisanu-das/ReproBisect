@@ -139,6 +139,48 @@ jobs:
           echo "ReproBisect exit: $rc"
           python3 -m json.tool chatterbot-source-mtime.json
 
+      - name: ReproBisect - SOURCE_DATE_EPOCH only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/chatterbot/.reprobisect.toml <<'EOF'
+          [build]
+          runner = "docker"
+          image = "reprobisect-chatterbot-validation:local"
+          command = ["python", "setup.py", "bdist_wheel"]
+          outputs = ["dist/ChatterBot-1.1.0a7-py2.py3-none-any.whl"]
+          timeout_seconds = 300
+
+          [experiments]
+          control_runs = 2
+          intervention_runs = 2
+          confirmation_runs = 1
+
+          [experiments.dimensions]
+          network_access = false
+          source_path = false
+          build_path = false
+          source_date_epoch = true
+          timezone = false
+          locale = false
+          hostname = false
+          source_mtime = false
+          cpu_count = false
+          umask = false
+          directory_order = false
+          EOF
+
+          set +e
+          target/debug/reprobisect check /tmp/chatterbot --format json > chatterbot-source-date-epoch.json
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+            echo "ReproBisect operational failure: exit $rc" >&2
+            exit "$rc"
+          fi
+          echo "ReproBisect exit: $rc"
+          python3 -m json.tool chatterbot-source-date-epoch.json
+
       - name: Upload validation evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -147,4 +189,5 @@ jobs:
           path: |
             chatterbot-build-path.json
             chatterbot-source-mtime.json
+            chatterbot-source-date-epoch.json
           if-no-files-found: warn
