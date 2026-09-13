@@ -29,6 +29,6 @@ jobs:
           git apply "$patch"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/ci.yml .github/workflows/release.yml src/compat.rs src/runner/oci.rs tests/evidence/phase18-build-run-v10.json
-          git commit -m "Fix RC1 qualification tests and toolchain matrix"
+          git add src/compat.rs src/runner/oci.rs tests/evidence/phase18-build-run-v10.json
+          git commit -m "Fix RC1 qualification tests"
           git push origin HEAD:phase21-rc1
