@@ -46,9 +46,19 @@
   ],
   "runner_backend": "docker",
   "source_overrides": [],
-  "network_trace": {},
-  "process_trace": {},
-  "runtime_dependency_provenance": {},
+  "network_trace": {
+    "attempted": false,
+    "tracer_available": false,
+    "connect_calls": 0,
+    "sendto_calls": 0
+  },
+  "process_trace": {
+    "attempted": false,
+    "tracer_available": false
+  },
+  "runtime_dependency_provenance": {
+    "attempted": false
+  },
   "log_capture_max_bytes": 1048576,
   "stdout_sha256": "8e3ea57ec9da4c55ea991637eee33d1545bdfff0a88d28954942f5d6977175c3",
   "stderr_sha256": "45bc65786da5d596e329fda7a8bca5aa8a462e44de90d2e9a36e8a06a417b84f",

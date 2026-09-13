@@ -2492,14 +2492,14 @@ mod tests {
         fs::write(temp.path().join("dependency-status"), "available\n").unwrap();
         fs::write(
             temp.path().join("dependency-cache-before.tsv"),
-            "cargo\t2\t20\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "cargo\t2\t20\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t0\t100\t1000\n",
         )
         .unwrap();
         fs::write(
             temp.path().join("dependency-cache-after.tsv"),
             concat!(
-                "cargo\t3\t30\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
-                "demo\t1\t7\tf2d4517b0e2664ef422e3bda2c0ed892dbec3f63895aebcf740619971ec61642\n",
+                "cargo\t3\t30\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\t0\t100\t1000\n",
+                "demo\t1\t7\tf2d4517b0e2664ef422e3bda2c0ed892dbec3f63895aebcf740619971ec61642\t0\t100\t1000\n",
             ),
         )
         .unwrap();

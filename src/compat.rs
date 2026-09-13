@@ -756,6 +756,13 @@ mod tests {
     fn phase8_unbounded_cache_summary_gets_explicit_legacy_sentinels() {
         let mut run = phase6_run();
         run["schema_version"] = Value::from(3_u64);
+        run["source_overrides"] = json!([]);
+        run["network_trace"] = json!({
+            "attempted": false,
+            "tracer_available": false,
+            "connect_calls": 0,
+            "sendto_calls": 0
+        });
         run["runtime_dependency_provenance"] = json!({
             "attempted": true,
             "dependency_files": [],
