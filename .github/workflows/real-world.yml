@@ -24,7 +24,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.85.1
-      - run: cargo build
+      - run: cargo build --locked
       - name: Install Podman
         if: inputs.runner == 'podman'
         run: sudo apt-get update && sudo apt-get install -y podman
