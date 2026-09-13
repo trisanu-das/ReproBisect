@@ -16,19 +16,45 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - name: Apply lock hardening if needed
+      - name: Enforce Cargo.lock in local gates
         shell: bash
         run: |
           set -euo pipefail
-          patch=.github/rc1-integration-fix.patch
-          [[ -f "$patch" ]] || exit 0
-          if ! git apply --check "$patch"; then
-            echo "lock-hardening patch already applied or no longer applicable"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              "scripts/test-fixtures.sh": [
+                  ('cargo build --manifest-path "${ROOT}/Cargo.toml"', 'cargo build --locked --manifest-path "${ROOT}/Cargo.toml"'),
+              ],
+              "scripts/test-podman.sh": [
+                  ('cargo run --quiet -- check "$tmp" --format json > "$output"', 'cargo run --locked --quiet -- check "$tmp" --format json > "$output"'),
+              ],
+              "scripts/release-check.py": [
+                  ('        run([cargo, "check", "--all-targets"]),', '        run([cargo, "check", "--locked", "--all-targets"]),'),
+                  ('        run([cargo, "test", "--all-targets"]),', '        run([cargo, "test", "--locked", "--all-targets"]),'),
+              ],
+          }
+
+          for name, pairs in replacements.items():
+              path = Path(name)
+              text = path.read_text(encoding="utf-8")
+              for old, new in pairs:
+                  if new in text and old not in text:
+                      continue
+                  count = text.count(old)
+                  if count != 1:
+                      raise SystemExit(f"{name}: expected exactly one match for {old!r}, found {count}")
+                  text = text.replace(old, new, 1)
+              path.write_text(text, encoding="utf-8")
+          PY
+          git diff --check
+          git add scripts/test-fixtures.sh scripts/test-podman.sh scripts/release-check.py
+          if git diff --cached --quiet; then
+            echo "lock hardening already present"
             exit 0
           fi
-          git apply "$patch"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add scripts/test-fixtures.sh scripts/test-podman.sh scripts/release-check.py
           git commit -m "Enforce Cargo.lock in local release gates"
           git push origin HEAD:phase21-rc1
