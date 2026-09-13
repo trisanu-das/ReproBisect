@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    engine::fix::FixReport,
+    engine::FixReport,
     model::{BuildFailure, BuildRun, CheckReport, EnvironmentComparisonReport},
     schema::{
         BUILD_EVIDENCE_SCHEMA_CURRENT, EvidenceKind, CHECK_REPORT_SCHEMA_CURRENT,
@@ -97,7 +97,7 @@ pub fn load_evidence(path: &Path) -> Result<LoadedEvidence> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("cannot open evidence file {}", path.display()))?;
     let mut raw = Vec::new();
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(MAX_EVIDENCE_BYTES.saturating_add(1))
         .read_to_end(&mut raw)
         .with_context(|| format!("cannot read evidence file {}", path.display()))?;

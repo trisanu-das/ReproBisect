@@ -297,6 +297,9 @@ fn source_date_epoch_plan(project_root: &Path, config: &Config, result: &Interve
         &format!("{}-pin", result.intervention.id),
         &value,
     );
+    let project_patch_path = project_patch
+        .as_ref()
+        .map(|patch| patch.path.display().to_string());
 
     FixPlan {
         id: format!("{}-pin", result.intervention.id),
@@ -324,8 +327,8 @@ fn source_date_epoch_plan(project_root: &Path, config: &Config, result: &Interve
             .collect(),
         limitations: vec![
             "this is an operational normalization candidate; if SOURCE_DATE_EPOCH is intentionally part of the declared build identity, pinning it changes that build input rather than removing timestamp semantics".to_string(),
-            if project_patch.is_some() {
-                format!("the project-level candidate pins SOURCE_DATE_EPOCH through {}; it does not rewrite timestamp-generating source code", project_patch.as_ref().map(|patch| patch.path.display().to_string()).unwrap_or_default())
+            if let Some(path) = project_patch_path {
+                format!("the project-level candidate pins SOURCE_DATE_EPOCH through {path}; it does not rewrite timestamp-generating source code")
             } else {
                 "no safe supported project-level timestamp patch point was found, so verification uses runner-level normalization only".to_string()
             },

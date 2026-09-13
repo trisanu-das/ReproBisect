@@ -622,7 +622,7 @@ fn validate_regular_project_file(project_root: &Path, label: &str, relative: &Pa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::interventions::baseline_environment;
+    use crate::engine::baseline_environment;
 
     fn config() -> Config {
         toml::from_str(
