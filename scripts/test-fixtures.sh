@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${ROOT}/target/debug/reprobisect"
 
-cargo build --manifest-path "${ROOT}/Cargo.toml"
+cargo build --locked --manifest-path "${ROOT}/Cargo.toml"
 
 cleanup_fixture() {
   rm -rf "${ROOT}/fixtures/$1/.reprobisect"

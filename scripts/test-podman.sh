@@ -19,7 +19,7 @@ PY
 output="$tmp/report.json"
 (
   cd "$repo_root"
-  cargo run --quiet -- check "$tmp" --format json > "$output"
+  cargo run --locked --quiet -- check "$tmp" --format json > "$output"
 )
 python3 - "$output" <<'PY'
 import json, sys

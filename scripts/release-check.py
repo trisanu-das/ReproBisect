@@ -152,8 +152,8 @@ def rust_checks(require_rust: bool) -> tuple[list[str], list[dict[str, Any]]]:
     commands = [
         run([rustc, "--version"]),
         run([cargo, "--version"]),
-        run([cargo, "check", "--all-targets"]),
-        run([cargo, "test", "--all-targets"]),
+        run([cargo, "check", "--locked", "--all-targets"]),
+        run([cargo, "test", "--locked", "--all-targets"]),
     ]
     return ["Rust compiler and all-target unit gates passed"], commands
 
