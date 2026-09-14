@@ -1,12 +1,7 @@
-# ReproBisect (NOT AI SLOP, TRUST ME)
+# ReproBisect 
 
-**Find which environment input actually caused your build to change.**
-
-ReproBisect is a causal debugger for non-reproducible builds.
-
-When the same source produces different artifacts on different machines, paths, timestamps, toolchains, or environments, tools such as binary diffing can tell you **what changed**. ReproBisect tries to determine **what caused it**.
-
-It repeatedly rebuilds your project in controlled containers, changes one environmental input at a time, and confirms a diagnosis by reverting to the baseline.
+ReproBisect is a *causal debugger* for non-reproducible builds.
+When the same source produces different artifacts on different machines, paths, timestamps, toolchains, or environments, tools such as binary diffing can tell you **what changed**. ReproBisect tries to determine **what caused it**. It repeatedly rebuilds your project in controlled containers, changes one environmental input at a time, and confirms a diagnosis by reverting to the baseline.
 
 ```text
 same source
@@ -24,7 +19,7 @@ same source
 
 If changing only the build path repeatedly changes the artifact, and reverting the path restores the original result, ReproBisect has evidence that the **build path is causal** rather than merely present somewhere in the binary.
 
-## 60-second example
+## Usage Example
 
 Suppose this succeeds:
 
@@ -52,10 +47,10 @@ reprobisect check .
 
 ReproBisect will:
 
-1. build the project repeatedly to verify the baseline is stable;
-2. rebuild it under controlled environmental changes;
-3. compare the declared artifact;
-4. localize relevant differences where possible;
+1. build the project repeatedly to verify the baseline is stable.
+2. rebuild it under controlled environmental changes.
+3. compare the declared artifact.
+4. localize relevant differences where possible.
 5. revert successful interventions before making strong causal claims.
 
 For machine-readable evidence:
@@ -64,30 +59,28 @@ For machine-readable evidence:
 reprobisect check . --format json
 ```
 
-That's the core workflow.
-
 ---
 
-## When should I use ReproBisect?
+## Use-Case
 
 Use ReproBisect when you have a question like:
 
-> “These two builds differ. Which environmental input is actually responsible?”
+> “Which environmental input is responsible for two differing builds?”
 
-Typical cases include:
+Typical cases might be:
 
-* debug paths embedded in ELF binaries;
-* timestamps or filesystem mtimes leaking into artifacts;
-* archive member metadata changing;
-* locale, timezone, hostname, or umask affecting output;
-* compiler/linker/archive-tool differences;
-* dependency declaration or lockfile changes;
-* build-image differences;
-* network-dependent builds;
-* parallelism-sensitive or stochastic build behavior;
+* debug paths embedded in ELF binaries.
+* timestamps or filesystem mtimes leaking into artifacts.
+* archive member metadata changing.
+* locale, timezone, hostname, or umask affecting output.
+* compiler/linker/archive-tool differences.
+* dependency declaration or lockfile changes.
+* build-image differences.
+* network-dependent builds.
+* parallelism-sensitive or stochastic build behavior.
 * interactions between multiple otherwise harmless variables.
 
-### ReproBisect vs other tools
+### A comparision between existing tools and ReproBisect
 
 | Tool / approach     | Best question                                                                                                  |
 | ------------------- | -------------------------------------------------------------------------------------------------------------- |
@@ -96,20 +89,18 @@ Typical cases include:
 | **manual rebuilds** | *Does changing this thing seem to affect my build?*                                                            |
 | **ReproBisect**     | *Which tested environmental change causally explains the artifact difference, with repeat/reversion evidence?* |
 
-These tools are complementary.
-
-A useful workflow is often:
+A example of useful workflow using a combination of the above could be:
 
 ```text
 ReproBisect → identify causal dimension
 diffoscope → deeply inspect the resulting artifact difference
 ```
 
-ReproBisect is not intended to replace a detailed binary differ.
+NOTE: ReproBisect is not intended to replace a detailed binary diff.
 
 ---
 
-## Installation
+## Installation Guide
 
 ### Prebuilt Linux release
 
@@ -155,20 +146,16 @@ Then:
 ./target/release/reprobisect --version
 ```
 
-### Runtime requirement
+### Requirements
 
-You need a working OCI container runtime:
-
-* Docker, or
-* Podman.
-
-ReproBisect currently targets Linux containerized builds.
+* You need a working OCI container runtime(Docker/Podman).
+* ReproBisect currently targets Linux containerized builds.
 
 ---
 
 ## Quick start
 
-You can generate a starter configuration:
+Generate a starter configuration:
 
 ```bash
 reprobisect init .
@@ -214,11 +201,11 @@ The rest of the workflow is unchanged.
 
 The default deterministic experiment set covers several common sources of build nondeterminism, including:
 
-* build/workspace path;
-* `SOURCE_DATE_EPOCH`;
-* timezone;
-* locale;
-* hostname.
+* build/workspace path
+* `SOURCE_DATE_EPOCH`
+* timezone
+* locale
+* hostname
 
 Additional dimensions can be enabled explicitly.
 
@@ -269,7 +256,7 @@ target = "requirements.txt"
 variant_file = "requirements.variant.txt"
 ```
 
-The user's checkout is not modified; the replacement happens in a fresh experiment workspace.
+The user's checkout is not modified. The replacement happens in a fresh experiment workspace.
 
 ### Project-specific environment variable
 
@@ -301,15 +288,12 @@ A normal deterministic experiment follows roughly this sequence:
         ↓
 5. Repeat the intervention
         ↓
-6. Revert to baseline
+6. Revert to baseline(IMPORTANT)
         ↓
 7. Promote evidence-backed diagnoses
 ```
 
-That final reversion matters.
-
 Seeing `/tmp/build-A` in one binary and `/tmp/build-B` in another is useful evidence, but it does not by itself prove that the build directory caused the difference.
-
 ReproBisect deliberately distinguishes **correlation** from **intervention-backed diagnosis**.
 
 ---
@@ -346,7 +330,6 @@ Depending on the format, ReproBisect can inspect information such as:
 * selected executable/container structural metadata.
 
 The artifact analyzer is intentionally bounded and non-executing.
-
 For deep byte-level inspection, use a dedicated tool such as `diffoscope` after ReproBisect has narrowed the causal dimension.
 
 ---
@@ -367,15 +350,13 @@ reprobisect fix . --verify
 
 Current rule-based fixes include cases involving:
 
-* compiler path remapping;
-* `SOURCE_DATE_EPOCH`;
-* source/archive mtime normalization;
-* umask/mode normalization.
+* compiler path remapping
+* `SOURCE_DATE_EPOCH`
+* source/archive mtime normalization
+* umask/mode normalization
 
 Fix verification happens in a temporary copy of the project.
-
 **ReproBisect does not silently modify your working tree.**
-
 If it cannot identify a conservative patch point, it refuses to invent one.
 
 ---
@@ -383,11 +364,8 @@ If it cannot identify a conservative patch point, it refuses to invent one.
 ## Uncontrolled nondeterminism
 
 ReproBisect first asks whether the canonical baseline reproduces itself.
-
 If repeated baseline builds already differ, one-variable causal experiments are not trustworthy.
-
 In that case ReproBisect reports uncontrolled nondeterminism instead of manufacturing a root-cause diagnosis.
-
 This distinction is important for races, random seeds, unordered parallel work, external services, and other stochastic effects.
 
 ---
@@ -406,10 +384,8 @@ cpu_count = true
 ```
 
 ReproBisect uses matched baseline/variant trials and a one-sided Fisher exact test to determine whether the intervention measurably changes the artifact-change rate.
-
 This can show that parallelism affects the distribution of outputs.
-
-It does **not** identify the internal race itself.
+It does not identify the internal race itself.
 
 ---
 
@@ -427,7 +403,6 @@ max_interaction_variables = 8
 ```
 
 ReproBisect first identifies variables that were individually inert, then tests their combined effect and applies a ddmin-style search to find a 1-minimal observed interaction.
-
 The resulting set is evidence about the tested variables, not a claim that no other explanation exists.
 
 ---
@@ -438,14 +413,14 @@ ReproBisect can optionally collect bounded, privacy-conscious provenance about t
 
 Examples include:
 
-* source Git commit and dirty state;
-* dependency lock/manifest fingerprints;
-* resolved container image identity;
-* best-effort toolchain versions;
-* tool invocation counts;
-* aggregate dependency-cache fingerprints;
-* redacted network syscall summaries;
-* process-aware file-input/output relationships.
+* source Git commit and dirty state
+* dependency lock/manifest fingerprints
+* resolved container image identity
+* best-effort toolchain versions
+* tool invocation counts
+* aggregate dependency-cache fingerprints
+* redacted network syscall summaries
+* process-aware file-input/output relationships
 
 Optional tracing:
 
@@ -459,12 +434,12 @@ Raw traces remain ephemeral.
 
 Persisted evidence intentionally avoids recording data such as:
 
-* exact network endpoints;
-* command-line arguments from traced processes;
-* raw container PIDs;
-* dependency-cache paths;
-* arbitrary temporary paths;
-* raw syscall traces.
+* exact network endpoints
+* command-line arguments from traced processes
+* raw container PIDs
+* dependency-cache paths
+* arbitrary temporary paths
+* raw syscall traces
 
 These signals are provenance and correlation evidence. They are **not byte-level taint tracking**.
 
@@ -502,26 +477,22 @@ Persisted evidence has explicit schemas and compatibility handling. See:
 
 ReproBisect 1.0 focuses on:
 
-* Linux;
-* Docker and Podman;
-* containerized builds;
-* an explicit build command;
-* one or more declared output artifacts.
+* Linux
+* Docker and Podman
+* containerized builds
+* an explicit build command
+* one or more declared output artifacts
 
-It does **not** currently promise to:
+It does not currently promise to:
 
-* automatically understand every build system;
-* prove full build hermeticity;
-* trace individual bytes through a process;
-* identify arbitrary nondeterministic code inside your program;
-* replace detailed artifact diffing;
-* guarantee that every possible environmental variable has been tested.
+* automatically understand every build system
+* prove full build hermeticity
+* trace individual bytes through a process
+* identify arbitrary nondeterministic code inside your program
+* replace detailed artifact diffing
+* guarantee that every possible environmental variable has been tested
 
-A diagnosis means:
-
-> Under the controlled experiment that was actually performed, changing this tested input repeatedly changed the observed artifact, and the configured confirmation criteria were satisfied.
-
-That is deliberately narrower than “we found every cause of nondeterminism.”
+A diagnosis means that, under the controlled experiment that was actually performed, changing this tested input repeatedly changed the observed artifact, and the configured confirmation criteria were satisfied. This is deliberately narrower than “we found every cause of nondeterminism.”
 
 ---
 
@@ -529,13 +500,13 @@ That is deliberately narrower than “we found every cause of nondeterminism.”
 
 ReproBisect's release qualification includes:
 
-* Rust MSRV and current stable compiler checks/tests;
-* locked dependency resolution;
-* Docker acceptance tests;
-* Podman acceptance tests;
-* synthetic reproducibility fixtures;
-* real-world builds pinned to immutable upstream commits;
-* deterministic Linux release packaging.
+* Rust MSRV and current stable compiler checks/tests
+* locked dependency resolution
+* Docker acceptance tests
+* Podman acceptance tests
+* synthetic reproducibility fixtures
+* real-world builds pinned to immutable upstream commits
+* deterministic Linux release packaging
 
 The real-world corpus currently contains seven cases spanning C/C++, Rust, Python packaging, and OpenSBI-based build scenarios.
 
@@ -567,14 +538,13 @@ That is particularly useful.
 
 If you have a real build that changes across machines or environments and ReproBisect:
 
-* misses the cause;
-* produces a false diagnosis;
-* becomes inconclusive unexpectedly;
-* cannot represent the relevant environment difference; or
-* fails on an artifact/build system we should support,
+* misses the cause
+* produces a false diagnosis
+* becomes inconclusive unexpectedly
+* cannot represent the relevant environment difference
+* fails on an artifact/build system we should support
 
 please open an issue with a minimized reproducer if possible.
-
 Real unexplained builds are the most useful input for deciding what ReproBisect should support next.
 
 ---
@@ -582,7 +552,6 @@ Real unexplained builds are the most useful input for deciding what ReproBisect 
 ## Security and privacy
 
 See [`SECURITY.md`](SECURITY.md) for the supported-version and vulnerability-reporting policy.
-
 ReproBisect deliberately bounds persisted logs and tracing evidence and avoids persisting several classes of potentially sensitive runtime details. Review the provenance/tracing documentation before enabling those features on confidential builds.
 
 ---
@@ -590,7 +559,6 @@ ReproBisect deliberately bounds persisted logs and tracing evidence and avoids p
 ## Contributing
 
 Bug reports, minimized non-reproducible builds, new regression fixtures, documentation improvements, and narrowly scoped feature proposals are welcome.
-
 For significant new experiment dimensions or evidence-schema changes, open an issue first so the causal model and compatibility implications can be discussed before implementation.
 
 ---
