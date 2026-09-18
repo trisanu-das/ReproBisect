@@ -5,7 +5,13 @@ use crate::model::{
 };
 
 pub fn print_text(report: &CheckReport, verbose: bool) {
-    println!("ReproBisect causal build experiment");
+    print_diagnosis_summary(report);
+    if !verbose {
+        return;
+    }
+
+    println!();
+    println!("Detailed experiment evidence");
     println!("experiment: {}", report.experiment_id);
     println!("source sha256: {}", report.source_digest);
     if let Some(commit) = &report.source_provenance.git_commit {
@@ -277,6 +283,233 @@ pub fn print_text(report: &CheckReport, verbose: bool) {
     }
     for note in &report.notes {
         println!("note: {note}");
+    }
+}
+
+
+fn print_diagnosis_summary(report: &CheckReport) {
+    println!("ReproBisect diagnosis");
+    println!("result: {}", check_status_label(&report.status));
+
+    let controls_stable = !report.artifact_comparisons.is_empty()
+        && report
+            .artifact_comparisons
+            .iter()
+            .all(|comparison| comparison.equal_across_runs);
+    println!(
+        "controls: {} run(s), {}",
+        report.runs.len(),
+        if controls_stable { "stable" } else { "not stable" }
+    );
+
+    if report.diagnoses.is_empty() {
+        match report.status {
+            CheckStatus::Reproducible => {
+                println!("cause: none found within the tested intervention space");
+            }
+            CheckStatus::UncontrolledNondeterminism => {
+                println!("cause: not attributed; identical controlled baseline runs changed");
+            }
+            CheckStatus::Inconclusive => {
+                println!("cause: inconclusive under the completed experiments");
+            }
+            CheckStatus::NonReproducible => {
+                println!("cause: artifact difference observed, but no diagnosis was promoted");
+            }
+        }
+    } else {
+        for (index, diagnosis) in report.diagnoses.iter().enumerate() {
+            println!();
+            if report.diagnoses.len() == 1 {
+                println!("cause: {}", diagnosis.title);
+            } else {
+                println!("cause {}: {}", index + 1, diagnosis.title);
+            }
+            println!(
+                "causal variable{}: {}",
+                if diagnosis.causal_variables.len() == 1 { "" } else { "s" },
+                diagnosis.causal_variables.join(", ")
+            );
+            if !diagnosis.affected_artifacts.is_empty() {
+                println!(
+                    "artifact{}: {}",
+                    if diagnosis.affected_artifacts.len() == 1 { "" } else { "s" },
+                    diagnosis
+                        .affected_artifacts
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            println!("confidence: {}", confidence_label(&diagnosis.confidence));
+
+            for artifact in &diagnosis.affected_artifacts {
+                if let Some((baseline, variant, reversion)) =
+                    diagnosed_artifact_hashes(report, &diagnosis.causal_variables, artifact)
+                {
+                    println!("hashes for {}:", artifact.display());
+                    println!("  baseline:  {}", short_hash(baseline));
+                    println!("  variant:   {}", short_hash(variant));
+                    match reversion {
+                        Some(hash) => println!("  reversion: {} (confirmed)", short_hash(hash)),
+                        None => println!("  reversion: <not recorded>"),
+                    }
+                }
+            }
+
+            if !diagnosis.evidence.is_empty() {
+                println!("evidence:");
+                for evidence in &diagnosis.evidence {
+                    println!("  - {evidence}");
+                }
+            }
+            if !diagnosis.remediation.is_empty() {
+                println!("likely remediation:");
+                for remediation in &diagnosis.remediation {
+                    println!("  - {remediation}");
+                }
+            }
+            if !diagnosis.limitations.is_empty() {
+                println!("limitations:");
+                for limitation in &diagnosis.limitations {
+                    println!("  - {limitation}");
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("tested variables:");
+    if report.interventions.is_empty() {
+        println!("  (none completed)");
+    } else {
+        for result in &report.interventions {
+            println!(
+                "  {:<24} {}{}",
+                result.intervention.variable,
+                intervention_summary_label(result),
+                reversion_summary_suffix(result)
+            );
+        }
+    }
+
+    if let Some(interaction) = &report.interaction_search {
+        if !interaction.candidate_variables.is_empty() {
+            let outcome = if interaction.changed && interaction.stable_effect {
+                "EFFECT"
+            } else if interaction.error.is_some() {
+                "ERROR"
+            } else {
+                "no promoted effect"
+            };
+            println!(
+                "  interaction({}) {}{}",
+                interaction.candidate_variables.join(", "),
+                outcome,
+                match interaction.reverted_to_baseline {
+                    Some(true) => " [reversion confirmed]",
+                    Some(false) => " [reversion failed]",
+                    None => "",
+                }
+            );
+        }
+    }
+
+    for note in &report.notes {
+        println!("note: {note}");
+    }
+    println!("details: rerun with -v for full experiment/provenance evidence");
+}
+
+fn diagnosed_artifact_hashes<'a>(
+    report: &'a CheckReport,
+    variables: &[String],
+    artifact: &std::path::Path,
+) -> Option<(&'a str, &'a str, Option<&'a str>)> {
+    for result in &report.interventions {
+        if !variables.iter().any(|variable| variable == &result.intervention.variable) {
+            continue;
+        }
+        let Some(delta) = result
+            .artifact_deltas
+            .iter()
+            .find(|delta| delta.changed && delta.logical_path == artifact)
+        else {
+            continue;
+        };
+        let reversion = result.confirmation_run.as_ref().and_then(|run| {
+            run.artifacts
+                .iter()
+                .find(|candidate| candidate.logical_path == artifact)
+                .map(|candidate| candidate.sha256.as_str())
+        });
+        return Some((
+            delta.baseline_sha256.as_str(),
+            delta.variant_sha256.as_str(),
+            reversion,
+        ));
+    }
+
+    if let Some(interaction) = &report.interaction_search {
+        if variables
+            .iter()
+            .all(|variable| interaction.minimal_variables.contains(variable))
+        {
+            if let Some(delta) = interaction
+                .artifact_deltas
+                .iter()
+                .find(|delta| delta.changed && delta.logical_path == artifact)
+            {
+                let reversion = interaction.confirmation_run.as_ref().and_then(|run| {
+                    run.artifacts
+                        .iter()
+                        .find(|candidate| candidate.logical_path == artifact)
+                        .map(|candidate| candidate.sha256.as_str())
+                });
+                return Some((
+                    delta.baseline_sha256.as_str(),
+                    delta.variant_sha256.as_str(),
+                    reversion,
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+fn intervention_summary_label(result: &crate::model::InterventionResult) -> &'static str {
+    if result.error.is_some() && result.runs.is_empty() && result.build_failures.is_empty() {
+        "ERROR"
+    } else if !result.build_failures.is_empty() && !result.runs.is_empty() {
+        "MIXED"
+    } else if !result.build_failures.is_empty() {
+        "BUILD FAILED"
+    } else if result.changed {
+        "EFFECT"
+    } else {
+        "no effect"
+    }
+}
+
+fn reversion_summary_suffix(result: &crate::model::InterventionResult) -> &'static str {
+    if !(result.changed || !result.build_failures.is_empty()) {
+        return "";
+    }
+    match result.reverted_to_baseline {
+        Some(true) => " [reversion confirmed]",
+        Some(false) => " [reversion failed]",
+        None => "",
+    }
+}
+
+fn check_status_label(status: &CheckStatus) -> &'static str {
+    match status {
+        CheckStatus::Reproducible => "REPRODUCIBLE_WITHIN_TESTED_SPACE",
+        CheckStatus::NonReproducible => "NON_REPRODUCIBLE",
+        CheckStatus::UncontrolledNondeterminism => "UNCONTROLLED_NONDETERMINISM",
+        CheckStatus::Inconclusive => "INCONCLUSIVE",
     }
 }
 
