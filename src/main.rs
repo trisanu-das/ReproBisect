@@ -2,6 +2,7 @@ mod artifact;
 mod cli;
 mod config;
 mod doctor;
+mod init;
 mod engine;
 mod environment;
 mod evidence;
