@@ -1,8 +1,10 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    thread,
     time::UNIX_EPOCH,
 };
 
@@ -139,21 +141,39 @@ fn run_build(
             .arg(format!("{}:{}", metadata.uid(), metadata.gid()));
     }
 
-    command.arg(image).args(build_command);
+    command
+        .arg(image)
+        .args(build_command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    let output = command.output().with_context(|| {
+    let mut child = command.spawn().with_context(|| {
         format!(
             "cannot execute {} for output discovery; run reprobisect doctor to check runtime readiness",
             runner.display_name()
         )
     })?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("output-discovery stdout pipe was not available")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("output-discovery stderr pipe was not available")?;
+    let stdout_thread = thread::spawn(move || drain_tail(stdout));
+    let stderr_thread = thread::spawn(move || drain_tail(stderr));
 
-    if !output.status.success() {
-        let stderr = bounded_tail(&output.stderr);
-        let stdout = bounded_tail(&output.stdout);
+    let status = child
+        .wait()
+        .context("cannot wait for temporary output-discovery build")?;
+    let stdout = join_capture(stdout_thread, "stdout")?;
+    let stderr = join_capture(stderr_thread, "stderr")?;
+
+    if !status.success() {
         bail!(
             "temporary discovery build failed with status {}{}{}",
-            output.status,
+            status,
             if stderr.is_empty() {
                 String::new()
             } else {
@@ -170,12 +190,47 @@ fn run_build(
     Ok(())
 }
 
-fn bounded_tail(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return String::new();
+fn drain_tail<R: Read>(mut reader: R) -> std::io::Result<String> {
+    let mut retained = Vec::with_capacity(FAILURE_OUTPUT_BYTES);
+    let mut buffer = [0_u8; 16 * 1024];
+
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if read == 0 {
+            break;
+        }
+
+        if read >= FAILURE_OUTPUT_BYTES {
+            retained.clear();
+            retained.extend_from_slice(&buffer[read - FAILURE_OUTPUT_BYTES..read]);
+            continue;
+        }
+
+        let overflow = retained
+            .len()
+            .saturating_add(read)
+            .saturating_sub(FAILURE_OUTPUT_BYTES);
+        if overflow > 0 {
+            retained.drain(..overflow);
+        }
+        retained.extend_from_slice(&buffer[..read]);
     }
-    let start = bytes.len().saturating_sub(FAILURE_OUTPUT_BYTES);
-    String::from_utf8_lossy(&bytes[start..]).trim().to_string()
+
+    Ok(String::from_utf8_lossy(&retained).trim().to_string())
+}
+
+fn join_capture(
+    handle: thread::JoinHandle<std::io::Result<String>>,
+    stream: &str,
+) -> Result<String> {
+    let captured = handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("{stream} capture thread panicked"))?;
+    captured.with_context(|| format!("cannot read output-discovery {stream}"))
 }
 
 fn snapshot(root: &Path) -> Result<Snapshot> {
@@ -456,6 +511,16 @@ fn likely_intermediate_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_tail_capture_is_bounded() {
+        let mut bytes = vec![b'A'; FAILURE_OUTPUT_BYTES + 1024];
+        bytes.extend_from_slice(b"FINAL");
+        let captured = drain_tail(std::io::Cursor::new(bytes)).unwrap();
+
+        assert!(captured.len() <= FAILURE_OUTPUT_BYTES);
+        assert!(captured.ends_with("FINAL"));
+    }
 
     #[test]
     fn ranks_final_binary_and_filters_object_file() {
