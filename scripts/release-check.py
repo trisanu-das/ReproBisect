@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = "1.1.0-rc.1"
+EXPECTED_VERSION = "1.1.0"
 EXPECTED_RELEASE_BRANCH = "develop/1.1.0"
 EXPECTED_TAG_GLOB = "v1.1.*"
 EXPECTED_RUST_VERSION = "1.85"
@@ -71,7 +71,7 @@ def check_package() -> list[str]:
     if package.get("rust-version") != EXPECTED_RUST_VERSION:
         raise RuntimeError(f"Cargo.toml rust-version must remain {EXPECTED_RUST_VERSION}")
     if package.get("publish") is not False:
-        raise RuntimeError("release candidate must remain publish = false until crates.io policy is decided")
+        raise RuntimeError("release source must remain publish = false until crates.io policy is decided")
 
     toolchain = tomllib.loads((ROOT / "rust-toolchain.toml").read_text(encoding="utf-8"))
     if toolchain.get("toolchain", {}).get("channel") != EXPECTED_TOOLCHAIN:
