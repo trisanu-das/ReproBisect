@@ -9,6 +9,7 @@ use crate::{
     compat,
     config::Config,
     doctor,
+    init,
     engine::{CompareOptions, CheckOptions, FixOptions, check_project, compare_environments, fix_project},
     environment::EnvironmentManifest,
     report,
@@ -25,7 +26,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Create a starter .reprobisect.toml.
+    /// Detect the project and create an editable starter .reprobisect.toml.
     Init(InitArgs),
 
     /// Check project configuration and OCI runtime readiness without running a build.
@@ -189,75 +190,7 @@ pub struct FixArgs {
 pub fn run_init(args: InitArgs) -> Result<()> {
     let project = fs::canonicalize(&args.project)
         .with_context(|| format!("cannot resolve project directory {}", args.project.display()))?;
-    let path = project.join(".reprobisect.toml");
-
-    if path.exists() && !args.force {
-        bail!(
-            "{} already exists; pass --force to overwrite it",
-            path.display()
-        );
-    }
-
-    let starter = r#"[build]
-runner = "docker" # or "podman"
-image = "gcc:14"
-command = ["sh", "-lc", "make"]
-outputs = ["build/app"]
-timeout_seconds = 600
-log_capture_max_bytes = 1048576
-
-[experiments]
-control_runs = 2
-intervention_runs = 1
-comparison_runs = 2
-comparison_subset_runs = 2
-confirmation_runs = 1
-stochastic_runs = 4
-stochastic_alpha = 0.05
-image_variants = []
-network_trace = false
-file_input_trace = false
-# Maximum raw syscall trace bytes parsed after each run. This does not bound
-# temporary strace file growth inside the isolated metadata mount.
-syscall_trace_max_bytes = 33554432
-runtime_dependency_provenance = false
-# Bound dependency-cache content hashing per cache root. Truncated samples are
-# reported as incomplete and are never promoted to confirmed cache mutations.
-dependency_cache_max_files = 2048
-dependency_cache_max_bytes = 134217728
-
-# Optional custom package-manager cache roots summarized without persisting paths/names:
-# [experiments.dependency_cache_paths]
-# cargo = "/root/.cargo/registry/cache"
-
-# Narrow same-image toolchain experiment example:
-# [experiments.toolchain_variables]
-# CC = ["gcc", "clang"]
-#
-# One-file dependency declaration experiment example:
-# [[experiments.dependency_variants]]
-# id = "candidate-lockfile"
-# target = "Cargo.lock"
-# variant_file = ".reprobisect-variants/Cargo.lock"
-
-[experiments.dimensions]
-network_access = false
-source_path = false
-build_path = true
-source_date_epoch = true
-timezone = true
-locale = true
-hostname = true
-source_mtime = false
-cpu_count = false
-umask = false
-directory_order = false
-"#;
-
-    fs::write(&path, starter)
-        .with_context(|| format!("cannot write {}", path.display()))?;
-
-    println!("created {}", path.display());
+    init::create_config(&project, args.force)?;
     Ok(())
 }
 
