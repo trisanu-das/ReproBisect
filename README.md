@@ -132,7 +132,7 @@ reprobisect 1.0.0
 
 ### Build from source
 
-ReproBisect requires Rust 1.85.1 or newer.
+ReproBisect declares Rust 1.85 as its MSRV; the repository pins and qualifies Rust 1.85.1 for development and release testing.
 
 ```bash
 git clone https://github.com/trisanu-das/ReproBisect.git
@@ -171,7 +171,21 @@ command = ["make"]
 outputs = ["build/app"]
 ```
 
-Then:
+Before spending time on controlled rebuilds, check that the project configuration and OCI runtime are ready:
+
+```bash
+reprobisect doctor .
+```
+
+`doctor` validates the configuration, checks that the configured Docker/Podman executable is available, verifies that the runtime is reachable, and reports whether the configured build image is already present locally. A missing local image is a warning rather than a failure because the runtime can normally pull it when the build starts.
+
+For machine-readable readiness information:
+
+```bash
+reprobisect doctor . --format json
+```
+
+Then run the causal experiment:
 
 ```bash
 reprobisect check .

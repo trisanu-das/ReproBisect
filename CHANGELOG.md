@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 1.1 development
+
+- adds `reprobisect doctor` to validate project configuration and OCI runtime readiness before starting expensive rebuild experiments;
+- provides text and JSON doctor reports with explicit PASS/WARN/FAIL/SKIP checks;
+- treats a missing local build image as a warning while treating an unavailable runner/runtime as not ready;
+- keeps the published `v1.0.0` release identity and persisted evidence schema versions unchanged while 1.1 development proceeds on a separate branch.
+
 ## 1.0.0 — Stable
 
 First stable ReproBisect release.
