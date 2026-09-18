@@ -59,6 +59,8 @@ For machine-readable evidence:
 reprobisect check . --format json
 ```
 
+The 1.1 text report is diagnosis-first: the default view leads with result, promoted cause and confidence, affected artifacts, baseline/variant/reversion hashes when available, evidence, remediation, and a compact effect/no-effect list of tested variables. Use `-v` when you need the full run, provenance, trace, and build-log detail.
+
 ---
 
 ## Use-Case
