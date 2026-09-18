@@ -1,6 +1,7 @@
 mod artifact;
 mod cli;
 mod config;
+mod doctor;
 mod engine;
 mod environment;
 mod evidence;
@@ -29,6 +30,7 @@ fn run() -> Result<()> {
 
     match cli.command {
         Command::Init(args) => cli::run_init(args),
+        Command::Doctor(args) => cli::run_doctor(args),
         Command::Check(args) | Command::Diagnose(args) => cli::run_check(args),
         Command::Compare(args) => cli::run_compare(args),
         Command::Fix(args) => cli::run_fix(args),

@@ -8,6 +8,7 @@ pub const EXIT_DIAGNOSTIC: i32 = 1;
 use crate::{
     compat,
     config::Config,
+    doctor,
     engine::{CompareOptions, CheckOptions, FixOptions, check_project, compare_environments, fix_project},
     environment::EnvironmentManifest,
     report,
@@ -26,6 +27,9 @@ pub struct Cli {
 pub enum Command {
     /// Create a starter .reprobisect.toml.
     Init(InitArgs),
+
+    /// Check project configuration and OCI runtime readiness without running a build.
+    Doctor(DoctorArgs),
 
     /// Run controlled rebuilds plus configured one-variable causal interventions.
     Check(CheckArgs),
@@ -58,6 +62,17 @@ pub struct InitArgs {
 pub enum OutputFormat {
     Text,
     Json,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Project directory containing .reprobisect.toml.
+    #[arg(default_value = ".")]
+    pub project: PathBuf,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -243,6 +258,28 @@ directory_order = false
         .with_context(|| format!("cannot write {}", path.display()))?;
 
     println!("created {}", path.display());
+    Ok(())
+}
+
+pub fn run_doctor(args: DoctorArgs) -> Result<()> {
+    let project = fs::canonicalize(&args.project)
+        .with_context(|| format!("cannot resolve project directory {}", args.project.display()))?;
+    let report_data = doctor::inspect_project(&project);
+
+    match args.format {
+        OutputFormat::Text => doctor::print_text(&report_data),
+        OutputFormat::Json => {
+            serde_json::to_writer_pretty(io::stdout().lock(), &report_data)
+                .context("cannot print doctor JSON")?;
+            println!();
+        }
+    }
+
+    if !report_data.ready {
+        io::stdout().flush().context("cannot flush doctor report output")?;
+        std::process::exit(EXIT_DIAGNOSTIC);
+    }
+
     Ok(())
 }
 
