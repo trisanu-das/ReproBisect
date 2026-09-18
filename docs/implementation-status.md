@@ -1,7 +1,7 @@
 # ReproBisect implementation status — 1.1 release candidate
 
 **Status date:** 2026-09-18  
-**Release target:** `1.1.0-rc.1` → `1.1.0`  
+**Release target:** `1.1.0`  
 **Branch:** `develop/1.1.0`  
 **Scope:** adoption/diagnostic UX, project initialization, output discovery, terminal reporting, and release hardening without persisted-evidence schema changes
 
@@ -9,7 +9,7 @@
 
 The planned 1.1 feature slice is implemented. ReproBisect's causal experiment engine, evidence schemas, exit semantics, and stable 1.0 behavior remain intact; 1.1 focuses on making the existing engine easier to configure, validate, and understand.
 
-The package is marked `1.1.0-rc.1` for qualification. This is a pre-release identity only: no tag or public 1.1 release is created by the development branch.
+The package is now marked `1.1.0` for final-tree qualification. This source-version promotion does not create a tag or public release.
 
 ## 1.1 features implemented
 
@@ -73,7 +73,7 @@ Release-hardening changes after that baseline must pass the same normal CI plus 
 
 ## Release hardening in this candidate
 
-The 1.1 candidate aligns package and lockfile metadata, updates source-policy checks for the 1.1 version, and updates the release workflow to:
+The 1.1 release tree aligns package and lockfile metadata, updates source-policy checks for the 1.1 version, and updates the release workflow to:
 
 - qualify `develop/1.1.0` and `v1.1.*` tags;
 - cancel superseded qualification runs on the same ref;
@@ -91,7 +91,7 @@ The remaining work is release qualification, not a new product feature layer:
 2. pass Docker and Podman synthetic suites;
 3. pass the full pinned real-world corpus under both OCI runtimes;
 4. inspect the resulting release artifacts and qualification records;
-5. promote the package from `1.1.0-rc.1` to `1.1.0`;
+5. verify all version guards and the lockfile agree on `1.1.0`;
 6. rerun the complete qualification workflow on the exact final tree;
 7. only then create `v1.1.0`.
 

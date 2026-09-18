@@ -24,4 +24,4 @@ When ReproBisect is hosted in a public repository, report security vulnerabiliti
 
 ## Supported security line
 
-The `1.0.0` line remains the current supported stable line. `1.1.0-rc.1` is a pre-release qualification candidate and is not yet a separate supported stable security line. Earlier `1.0.0-rc.*` and `0.1.0-alpha.*` snapshots are historical development artifacts.
+The `1.0.0` line remains the current published/supported stable line until `v1.1.0` is released. The `develop/1.1.0` branch carries the final 1.1.0 source version under release qualification; it is not a separately supported stable security line until publication. Earlier `1.0.0-rc.*` and `0.1.0-alpha.*` snapshots are historical development artifacts.

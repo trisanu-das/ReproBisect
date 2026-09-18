@@ -1,6 +1,6 @@
 # ReproBisect 1.1 release qualification
 
-This document defines the qualification contract for the ReproBisect 1.1 line. The current package version on `develop/1.1.0` is `1.1.0-rc.1`; the candidate is not a public stable release until the final `1.1.0` tag is created after all gates pass.
+This document defines the qualification contract for the ReproBisect 1.1 line. The current package version on `develop/1.1.0` is `1.1.0`. This is the final source version under qualification; it is not a public stable release until tag `v1.1.0` is created after all gates pass on the exact final tree.
 
 A source tree can be internally consistent without having been compiled or exercised against an OCI runtime. ReproBisect therefore separates **source-policy qualification** from **execution qualification** and does not treat a skipped gate as a pass.
 
@@ -64,14 +64,14 @@ The stable 1.0 exit contract remains unchanged in 1.1:
 
 JSON output remains the preferred automation contract; exit status is deliberately coarse.
 
-## Promotion from `1.1.0-rc.1` to `1.1.0`
+## Final `1.1.0` publication gate
 
-Promotion requires:
+The source version has already been promoted from `1.1.0-rc.1` to `1.1.0`. Publication now requires:
 
-1. all gates above passing on the candidate tree;
+1. all gates above passing again on the exact final `1.1.0` tree;
 2. no known high-severity regression or false-positive class introduced by the 1.1 changes;
-3. changing `Cargo.toml` and the root `Cargo.lock` package entry from `1.1.0-rc.1` to `1.1.0`;
-4. rerunning source policy, MSRV/stable, Docker, Podman, full real-world corpus, and packaging on that exact final commit;
+3. `Cargo.toml`, the root `Cargo.lock` package entry, `scripts/release-check.py`, and `scripts/static-check.py` all agreeing on `1.1.0`;
+4. retaining the release workflow's exact binary/package-version and tag/package-version checks;
 5. creating tag `v1.1.0` only after those gates pass.
 
-The public `v1.0.0` release remains the supported stable release until that promotion occurs.
+The public `v1.0.0` release remains the supported stable release until that tag/release is created.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.0 — Stable
+
+Prepared from the fully qualified 1.1.0-rc.1 feature set. The final source version is promoted to 1.1.0 without changing persisted evidence schemas or the 1.0 exit-code contract. Publication/tagging remains a separate action after the exact final tree passes qualification.
+
 ## 1.1.0-rc.1 — Release candidate
 
 - adds `reprobisect doctor` to validate project configuration and OCI runtime readiness before starting expensive rebuild experiments;
