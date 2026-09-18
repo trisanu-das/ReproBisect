@@ -832,6 +832,75 @@ PYSHELLFIX
   cleanup_fixture "${name}"
 }
 
+
+check_init_output_discovery() {
+  local project
+  local output
+  project="$(mktemp -d)"
+  output="$(mktemp)"
+
+  cat >"${project}/main.c" <<'EOF_INIT_C'
+int main(void) { return 0; }
+EOF_INIT_C
+
+  cat >"${project}/Makefile" <<'EOF_INIT_MAKE'
+all: build/app build/helper.o
+
+build/app: main.c
+	mkdir -p build
+	cc -O2 main.c -o build/app
+
+build/helper.o: main.c
+	mkdir -p build
+	cc -O2 -c main.c -o build/helper.o
+EOF_INIT_MAKE
+
+  "${BIN}" init "${project}" --discover-outputs >"${output}"
+
+  if [[ -e "${project}/build" ]]; then
+    echo "init-output-discovery: temporary probe mutated the source checkout" >&2
+    rm -rf "${project}" "${output}"
+    exit 1
+  fi
+
+  python3 - "${project}/.reprobisect.toml" "${output}" <<'PYINIT'
+import pathlib
+import sys
+import tomllib
+
+config_path, output_path = map(pathlib.Path, sys.argv[1:])
+config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+outputs = config["build"]["outputs"]
+if outputs != ["build/app"]:
+    raise SystemExit(
+        f"init-output-discovery: expected only high-confidence final output, got {outputs!r}"
+    )
+if config["build"].get("runner") != "docker":
+    raise SystemExit(
+        f"init-output-discovery: expected docker runner, got {config['build'].get('runner')!r}"
+    )
+
+text = output_path.read_text(encoding="utf-8")
+required = [
+    "probing build outputs with Docker in a temporary workspace",
+    "possible final artifacts detected:",
+    "build/app",
+]
+missing = [needle for needle in required if needle not in text]
+if missing:
+    raise SystemExit(
+        f"init-output-discovery: missing probe output {missing!r}; stdout={text!r}"
+    )
+if "build/helper.o" in text:
+    raise SystemExit(
+        "init-output-discovery: object-file intermediate leaked into candidate shortlist"
+    )
+print("PASS init-output-discovery: temporary build found final ELF without mutating checkout")
+PYINIT
+
+  rm -rf "${project}" "${output}"
+}
+
 check_fixture reproducible-c reproducible
 check_fixture timestamp-c non_reproducible SOURCE_DATE_EPOCH
 check_fixture pe-timestamp non_reproducible SOURCE_DATE_EPOCH
@@ -869,3 +938,4 @@ check_cargo_fix_verification
 
 check_provenance_fixture
 check_multi_provenance_fixture
+check_init_output_discovery
