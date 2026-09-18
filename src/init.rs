@@ -355,8 +355,8 @@ fn node_plan(project: &Path, pnpm: bool) -> InitPlan {
 
 fn maven_plan(project: &Path) -> InitPlan {
     let pom = read(project, "pom.xml").unwrap_or_default();
-    let artifact = xml_tag(&pom, "artifactId").map(clean_name);
-    let version = xml_tag(&pom, "version").map(clean_name);
+    let artifact = xml_tag(&pom, "artifactId").map(|value| clean_name(&value));
+    let version = xml_tag(&pom, "version").map(|value| clean_name(&value));
     let exact = artifact.is_some() && version.is_some();
     let output = match (artifact, version) {
         (Some(artifact), Some(version)) => format!("target/{artifact}-{version}.jar"),
@@ -390,7 +390,7 @@ fn gradle_plan(project: &Path) -> InitPlan {
 
 fn bazel_plan(project: &Path) -> InitPlan {
     let build = read(project, "BUILD.bazel").or_else(|| read(project, "BUILD")).unwrap_or_default();
-    let target = bazel_binary(&build).map(clean_name).filter(|name| !name.is_empty());
+    let target = bazel_binary(&build).map(|value| clean_name(&value)).filter(|name| !name.is_empty());
     let (command, output, confidence) = if let Some(target) = target {
         (
             vec!["bazel".into(), "build".into(), format!("//:{target}")],
@@ -417,7 +417,7 @@ fn bazel_plan(project: &Path) -> InitPlan {
 fn meson_plan(project: &Path) -> InitPlan {
     let target = read(project, "meson.build")
         .and_then(|text| quoted_call_arg(&text, "executable"))
-        .map(clean_name)
+        .map(|value| clean_name(&value))
         .filter(|name| !name.is_empty());
     let (output, confidence) = target
         .map(|target| (format!("build/{target}"), DetectionConfidence::High))
@@ -439,7 +439,7 @@ fn meson_plan(project: &Path) -> InitPlan {
 fn cmake_plan(project: &Path) -> InitPlan {
     let target = read(project, "CMakeLists.txt")
         .and_then(|text| call_arg(&text, "add_executable"))
-        .map(clean_name)
+        .map(|value| clean_name(&value))
         .filter(|name| !name.is_empty());
     let (output, confidence) = target
         .map(|target| (format!("build/{target}"), DetectionConfidence::High))
@@ -461,7 +461,7 @@ fn cmake_plan(project: &Path) -> InitPlan {
 fn autotools_plan(project: &Path) -> InitPlan {
     let target = read(project, "Makefile.am")
         .and_then(|text| assignment_first_word(&text, "bin_PROGRAMS"))
-        .map(clean_name)
+        .map(|value| clean_name(&value))
         .filter(|name| !name.is_empty());
     let (output, confidence) = target
         .map(|target| (target, DetectionConfidence::Medium))
@@ -501,7 +501,7 @@ fn make_plan(project: &Path) -> InitPlan {
         .or_else(|| read(project, "Makefile"))
         .or_else(|| read(project, "makefile"))
         .unwrap_or_default();
-    let target = make_target(&text).map(clean_name).filter(|name| !name.is_empty());
+    let target = make_target(&text).map(|value| clean_name(&value)).filter(|name| !name.is_empty());
     let (output, confidence) = target
         .map(|target| (target, DetectionConfidence::Medium))
         .unwrap_or_else(|| ("build/app".into(), DetectionConfidence::Low));
