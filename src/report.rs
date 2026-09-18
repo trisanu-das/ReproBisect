@@ -352,7 +352,12 @@ fn print_diagnosis_summary(report: &CheckReport) {
                     println!("  baseline:  {}", short_hash(baseline));
                     println!("  variant:   {}", short_hash(variant));
                     match reversion {
-                        Some(hash) => println!("  reversion: {} (confirmed)", short_hash(hash)),
+                        Some((hash, true)) => {
+                            println!("  reversion: {} (confirmed)", short_hash(hash))
+                        }
+                        Some((hash, false)) => {
+                            println!("  reversion: {} (did not recover baseline)", short_hash(hash))
+                        }
                         None => println!("  reversion: <not recorded>"),
                     }
                 }
@@ -426,7 +431,7 @@ fn diagnosed_artifact_hashes<'a>(
     report: &'a CheckReport,
     variables: &[String],
     artifact: &std::path::Path,
-) -> Option<(&'a str, &'a str, Option<&'a str>)> {
+) -> Option<(&'a str, &'a str, Option<(&'a str, bool)>)> {
     for result in &report.interventions {
         if !variables.iter().any(|variable| variable == &result.intervention.variable) {
             continue;
@@ -442,7 +447,12 @@ fn diagnosed_artifact_hashes<'a>(
             run.artifacts
                 .iter()
                 .find(|candidate| candidate.logical_path == artifact)
-                .map(|candidate| candidate.sha256.as_str())
+                .map(|candidate| {
+                    (
+                        candidate.sha256.as_str(),
+                        result.reverted_to_baseline == Some(true),
+                    )
+                })
         });
         return Some((
             delta.baseline_sha256.as_str(),
@@ -465,7 +475,12 @@ fn diagnosed_artifact_hashes<'a>(
                     run.artifacts
                         .iter()
                         .find(|candidate| candidate.logical_path == artifact)
-                        .map(|candidate| candidate.sha256.as_str())
+                        .map(|candidate| {
+                            (
+                                candidate.sha256.as_str(),
+                                interaction.reverted_to_baseline == Some(true),
+                            )
+                        })
                 });
                 return Some((
                     delta.baseline_sha256.as_str(),
