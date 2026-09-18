@@ -136,6 +136,8 @@ reprobisect 1.0.0
 
 ReproBisect declares Rust 1.85 as its MSRV; the repository pins and qualifies Rust 1.85.1 for development and release testing.
 
+The public stable release remains **1.0.0** while the `develop/1.1.0` branch is qualified as **1.1.0-rc.1**. Building that branch from source therefore reports `reprobisect 1.1.0-rc.1`; the prebuilt stable instructions above intentionally continue to reference 1.0.0 until 1.1 is promoted.
+
 ```bash
 git clone https://github.com/trisanu-das/ReproBisect.git
 cd ReproBisect
@@ -163,7 +165,7 @@ Generate a starter configuration:
 reprobisect init .
 ```
 
-On the 1.1 development branch, `init` deterministically inspects common build-system markers and proposes an editable image, build command, and likely output artifact. It recognizes Cargo, Go, npm/pnpm, Maven, Gradle, Bazel, Meson, CMake, Autotools, Python packaging, and Make projects. The command reports its confidence and any ambiguous markers; low-confidence output guesses are called out explicitly rather than treated as authoritative. Review the generated `.reprobisect.toml` before the first build.
+On the 1.1 release-candidate branch, `init` deterministically inspects common build-system markers and proposes an editable image, build command, and likely output artifact. It recognizes Cargo, Go, npm/pnpm, Maven, Gradle, Bazel, Meson, CMake, Autotools, Python packaging, and Make projects. The command reports its confidence and any ambiguous markers; low-confidence output guesses are called out explicitly rather than treated as authoritative. Review the generated `.reprobisect.toml` before the first build.
 
 When static output inference is ambiguous, you can opt into a single temporary containerized build and let ReproBisect rank the files that build created or changed:
 

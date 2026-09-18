@@ -1,124 +1,98 @@
-# ReproBisect implementation status — Phase 21
+# ReproBisect implementation status — 1.1 release candidate
 
-**Status date:** 2026-09-13
-**Release target:** `1.0.0-rc.1`
-**Scope:** v1.0 release hardening, frozen CLI/schema contract, immutable validation inputs, supply-chain hardening, and explicit release qualification
+**Status date:** 2026-09-18  
+**Release target:** `1.1.0-rc.1` → `1.1.0`  
+**Branch:** `develop/1.1.0`  
+**Scope:** adoption/diagnostic UX, project initialization, output discovery, terminal reporting, and release hardening without persisted-evidence schema changes
 
 ## Summary
 
-Phase 21 converts the Phase 20 implementation into the first stable-line release candidate. It deliberately does **not** claim final `1.0.0`: promotion is gated on compiler/MSRV checks, Docker and Podman execution, the complete real-world corpus, a committed dependency lock, and deterministic release packaging on the exact candidate commit.
+The planned 1.1 feature slice is implemented. ReproBisect's causal experiment engine, evidence schemas, exit semantics, and stable 1.0 behavior remain intact; 1.1 focuses on making the existing engine easier to configure, validate, and understand.
 
-No persisted evidence schema changes are introduced in this phase. The compatible schema ranges remain frozen while the release process, CLI exit semantics, CI policy, security boundary, and validation inputs are hardened around them.
+The package is marked `1.1.0-rc.1` for qualification. This is a pre-release identity only: no tag or public 1.1 release is created by the development branch.
 
-## Release-candidate contract
+## 1.1 features implemented
 
-The crate version is `1.0.0-rc.1` with Rust MSRV `1.85` and repository toolchain `1.85.1`.
+### `reprobisect doctor`
 
-The user-facing command set is frozen for the 1.0 line:
+`doctor` performs preflight checks before expensive experiments and supports both text and JSON output. It distinguishes PASS/WARN/FAIL/SKIP states, checks the configured Docker/Podman runtime, and treats a missing local image as a warning rather than a false readiness failure.
 
-- `init`;
-- `check` / `diagnose`;
-- `compare`;
-- `fix`;
-- `evidence`.
+### Build-system-aware `init`
 
-The process exit contract is explicit:
+`init` deterministically detects common project/build markers and proposes editable build configuration for Cargo, Go, npm/pnpm, Maven, Gradle, Bazel, Meson, CMake, Autotools, Python packaging, and Make.
 
-- `0` — operation completed without a diagnostic/finding status;
-- `1` — a reproducibility finding, minimized difference, uncontrolled nondeterminism, inconclusive result, or unsuccessful fix result;
-- `2` — Clap command-line usage error;
-- `5` — operational/internal error returned through the top-level `anyhow` boundary.
+Inference is explicitly labelled high/medium/low confidence and ambiguous multi-marker projects are surfaced rather than silently resolved as authoritative.
 
-Phase 21 introduces named Rust constants for the ReproBisect-owned exit values so accidental numeric drift is statically guarded.
+### Opt-in output discovery
 
-## Source-level defect fixed during release audit
+`reprobisect init . --discover-outputs` performs one detected build in a copied temporary workspace, compares before/after filesystem snapshots, filters common intermediates, classifies candidate executables/packages/archives, and prints a ranked shortlist.
 
-The Phase 20 source contained a real compile blocker in `src/cli.rs`: `run_check` attempted to print text using `options.verbose`, although `CheckOptions` intentionally has no `verbose` member. Phase 21 fixes the call to use `args.verbose` and adds a static regression guard specifically for this failure class.
+Only high-confidence candidates may replace statically inferred `build.outputs`; weaker candidates remain advisory.
 
-This discovery is also why Phase 21 remains conservative about qualification claims: text/static checks are useful but are not substitutes for a real Rust compiler gate.
+The probe is bounded:
 
-## Immutable real-world qualification inputs
+- at most 100,000 files per snapshot;
+- at most 12 ranked candidates;
+- 16 KiB retained tail per stdout/stderr stream;
+- 600-second build watchdog;
+- named temporary container killed on timeout.
 
-The Phase 20 seven-project real-world corpus remains the empirical validation set, but its OCI inputs are hardened for release qualification.
+The original checkout is not used as the build workspace.
 
-External build images are now referenced by immutable `@sha256:` OCI index digests rather than mutable tags. Helper images use local Phase 21 names whose Dockerfile `FROM` inputs are themselves digest-pinned. Offline corpus validation rejects external mutable image references and rejects helper Dockerfiles whose base image is not digest-pinned.
+### Diagnosis-first terminal report
 
-The corpus continues to pin every upstream project to a full 40-character Git commit. Result artifacts retain the exact ReproBisect executable SHA-256, upstream commit, case/config/helper/validator hashes, timings, expectations, outcomes, and full ReproBisect JSON report.
+Default text output now leads with result, promoted cause, confidence, affected artifacts, baseline/variant/reversion hashes where available, structural evidence, remediation, and tested-variable effect/no-effect summaries. `-v` retains the deeper experiment, provenance, trace, and build-log view.
 
-## CI and release workflow hardening
+## Compatibility
 
-GitHub Actions dependencies are pinned to exact 40-character action commits instead of mutable major-version tags or branches.
+No persisted evidence schema versions are changed for 1.1:
 
-Normal CI now separates:
+- `CheckReport`: 5–14;
+- `BuildRun` / `BuildFailure`: 1–10;
+- `FixReport`: 2–12;
+- `EnvironmentComparisonReport`: 1–4.
 
-1. source-policy/static validation;
-2. Rust compiler checks on MSRV `1.85.1` and stable;
-3. synthetic Docker fixture qualification;
-4. synthetic Podman fixture qualification;
-5. Docker real-world smoke corpus.
+The 1.0 exit-code contract is unchanged.
 
-The extended corpus workflow remains manually dispatchable for Docker or Podman.
+## Validation baseline
 
-A new release workflow gates package creation on Rust/source qualification plus a Docker/Podman container matrix. It runs the synthetic acceptance suite and the complete seven-case corpus before generating the Linux release archive.
+The feature-complete baseline at commit `6f361ce23e26840fde8e4c5e70d230999393aae1` passed normal CI run `35347314562`:
 
-Release packaging uses a normalized tar stream (`--sort=name`, epoch mtime, numeric uid/gid 0) and `gzip -n` before producing SHA-256 checksums.
+- source policy;
+- Rust 1.85.1;
+- Rust stable;
+- Docker fixture suite;
+- Podman suite;
+- real-world smoke corpus.
 
-## Security and release documentation
+The Docker fixture log explicitly reported:
 
-Phase 21 adds:
+`PASS init-output-discovery: temporary build found final ELF without mutating checkout`
 
-- `SECURITY.md` — threat model, secret/logging boundary, container assumptions, privacy guarantees and reporting guidance;
-- `CHANGELOG.md` — stable-line release-candidate history;
-- `docs/release-qualification.md` — exact promotion gates and schema/CLI compatibility boundary;
-- `scripts/release-check.py` — machine-readable source/release policy verification.
+Release-hardening changes after that baseline must pass the same normal CI plus the full release-qualification workflow before promotion.
 
-The security model explicitly states that a build command is untrusted code executed through the selected OCI runtime; ReproBisect is not itself a hardened hostile-code sandbox.
+## Release hardening in this candidate
 
-## Evidence compatibility freeze
+The 1.1 candidate aligns package and lockfile metadata, updates source-policy checks for the 1.1 version, and updates the release workflow to:
 
-Persisted evidence schemas remain unchanged from Phase 20:
+- qualify `develop/1.1.0` and `v1.1.*` tags;
+- cancel superseded qualification runs on the same ref;
+- derive the archive version from `Cargo.toml`;
+- verify the binary reports that exact version;
+- reject a tag that does not equal `v<package-version>`;
+- package `CHANGELOG.md` alongside README/security/license material;
+- preserve deterministic tar/gzip/checksum generation.
 
-- `CheckReport`: current **14**, supported **5–14**;
-- `BuildRun` / `BuildFailure`: current **10**, supported **1–10**;
-- `FixReport`: current **12**, supported **2–12**;
-- `EnvironmentComparisonReport`: current **4**, supported **1–4**.
+## Remaining work before stable 1.1
 
-The evidence schema history matrix now covers frozen Phases 6 through 21 and asserts that the Phase 19, 20 and 21 release lines retain those current schema values.
+The remaining work is release qualification, not a new product feature layer:
 
-## Validation performed in this environment
+1. pass source-policy and MSRV/stable gates on the candidate commit;
+2. pass Docker and Podman synthetic suites;
+3. pass the full pinned real-world corpus under both OCI runtimes;
+4. inspect the resulting release artifacts and qualification records;
+5. promote the package from `1.1.0-rc.1` to `1.1.0`;
+6. rerun the complete qualification workflow on the exact final tree;
+7. only then create `v1.1.0`.
 
-The Phase 21 source-policy gate passes in this sandbox. It covers:
-
-- `scripts/static-check.py`;
-- complete repository TOML parsing;
-- historical evidence/schema-matrix checks;
-- offline seven-case corpus validation;
-- GitHub Actions YAML parsing;
-- pinned-action policy checks;
-- shell syntax for Docker and Podman fixture harnesses;
-- Python syntax for corpus/release scripts;
-- `git diff --check`;
-- release metadata/version/MSRV/schema policy checks through `scripts/release-check.py --source-only`.
-
-The frozen Phase 20 source archive was independently re-materialized as a Git tree before Phase 21 work; its tree matched the published Phase 20 tree exactly.
-
-## Qualification not available in this sandbox
-
-This environment does not provide `rustc`, Cargo, Docker, or Podman, and outbound shell DNS is unavailable. Attempts to reach Debian package infrastructure fail at DNS resolution. Therefore this phase does **not** claim execution of:
-
-- `cargo check --all-targets`;
-- `cargo test --all-targets`;
-- MSRV/stable compiler matrix;
-- Docker synthetic fixtures;
-- Podman synthetic fixtures;
-- the seven real-world builds under either OCI backend.
-
-Those are mandatory release-candidate qualification gates, not optional checks. A skipped gate is not counted as a pass.
-
-## Remaining gate before final `1.0.0`
-
-`1.0.0-rc.1` is the end of the planned implementation phases, but not yet the final stable release claim. Promotion to `1.0.0` requires all gates in `docs/release-qualification.md` to pass on the exact candidate tree.
-
-In addition, the final stable tree must commit a `Cargo.lock` generated by the qualifying Rust toolchain and rerun Rust/release builds with `--locked`. This sandbox cannot truthfully generate or validate that lockfile because it has no Cargo and cannot fetch the dependency index.
-
-If those external gates expose defects, they should be fixed as release-candidate corrections rather than silently waived.
+CI-native user workflows/GitHub Action work remain a 1.2 concern and are intentionally not pulled into this release candidate.

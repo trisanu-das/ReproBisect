@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 1.1 development
+## 1.1.0-rc.1 — Release candidate
 
 - adds `reprobisect doctor` to validate project configuration and OCI runtime readiness before starting expensive rebuild experiments;
 - upgrades `reprobisect init` with deterministic build-system detection and editable image/command/output suggestions for Cargo, Go, npm/pnpm, Maven, Gradle, Bazel, Meson, CMake, Autotools, Python packaging, and Make projects;
@@ -9,7 +9,9 @@
 - redesigns the default text report around the diagnosis: result, cause, confidence, affected artifacts, baseline/variant/reversion hashes, evidence, remediation, and a compact tested-variable effect summary; full experiment/provenance detail remains available with `-v`;
 - provides text and JSON doctor reports with explicit PASS/WARN/FAIL/SKIP checks;
 - treats a missing local build image as a warning while treating an unavailable runner/runtime as not ready;
-- keeps the published `v1.0.0` release identity and persisted evidence schema versions unchanged while 1.1 development proceeds on a separate branch.
+- keeps persisted evidence schema versions and the 1.0 exit contract unchanged;
+- aligns package/lockfile identity with `1.1.0-rc.1` and hardens release qualification so artifact versioning is derived from `Cargo.toml`, tag/version mismatch is rejected, and deterministic packaging runs only after source, compiler, Docker, Podman, and real-world corpus gates;
+- leaves the published `v1.0.0` release as the supported stable line until final 1.1 promotion.
 
 ## 1.0.0 — Stable
 
