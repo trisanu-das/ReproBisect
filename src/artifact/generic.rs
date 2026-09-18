@@ -114,7 +114,7 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn detect_type(path: &Path) -> Result<ArtifactType> {
+pub(crate) fn detect_type(path: &Path) -> Result<ArtifactType> {
     let mut file = File::open(path)?;
     let mut prefix = [0_u8; 512];
     let read = file.read(&mut prefix)?;

@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod doctor;
 mod init;
+mod output_discovery;
 mod engine;
 mod environment;
 mod evidence;

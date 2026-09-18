@@ -12,6 +12,7 @@ use crate::{
     init,
     engine::{CompareOptions, CheckOptions, FixOptions, check_project, compare_environments, fix_project},
     environment::EnvironmentManifest,
+    model::RunnerBackend,
     report,
 };
 
@@ -48,6 +49,21 @@ pub enum Command {
     Evidence(EvidenceArgs),
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum InitRunner {
+    Docker,
+    Podman,
+}
+
+impl From<InitRunner> for RunnerBackend {
+    fn from(value: InitRunner) -> Self {
+        match value {
+            InitRunner::Docker => RunnerBackend::Docker,
+            InitRunner::Podman => RunnerBackend::Podman,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// Project directory.
@@ -57,6 +73,14 @@ pub struct InitArgs {
     /// Refuse to overwrite an existing config unless --force is passed.
     #[arg(long)]
     pub force: bool,
+
+    /// Run one temporary containerized build and use ranked produced-file candidates for build.outputs.
+    #[arg(long)]
+    pub discover_outputs: bool,
+
+    /// OCI runtime written to the generated config and used by --discover-outputs.
+    #[arg(long, value_enum, default_value = "docker")]
+    pub runner: InitRunner,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -190,7 +214,7 @@ pub struct FixArgs {
 pub fn run_init(args: InitArgs) -> Result<()> {
     let project = fs::canonicalize(&args.project)
         .with_context(|| format!("cannot resolve project directory {}", args.project.display()))?;
-    init::create_config(&project, args.force)?;
+    init::create_config(&project, args.force, args.discover_outputs, args.runner.into())?;
     Ok(())
 }
 

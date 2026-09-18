@@ -165,6 +165,14 @@ reprobisect init .
 
 On the 1.1 development branch, `init` deterministically inspects common build-system markers and proposes an editable image, build command, and likely output artifact. It recognizes Cargo, Go, npm/pnpm, Maven, Gradle, Bazel, Meson, CMake, Autotools, Python packaging, and Make projects. The command reports its confidence and any ambiguous markers; low-confidence output guesses are called out explicitly rather than treated as authoritative. Review the generated `.reprobisect.toml` before the first build.
 
+When static output inference is ambiguous, you can opt into a single temporary containerized build and let ReproBisect rank the files that build created or changed:
+
+```bash
+reprobisect init . --discover-outputs
+```
+
+The probe snapshots a temporary workspace before and after the detected build, filters common intermediates, classifies executable/archive/package candidates, and uses only medium/high-confidence candidates for the generated `build.outputs`. It never builds in or mutates your checkout. Docker is the default runtime; use `--runner podman` to generate and probe with Podman instead.
+
 Or create one yourself:
 
 ```toml
