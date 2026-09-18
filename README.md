@@ -161,6 +161,8 @@ Generate a starter configuration:
 reprobisect init .
 ```
 
+On the 1.1 development branch, `init` deterministically inspects common build-system markers and proposes an editable image, build command, and likely output artifact. It recognizes Cargo, Go, npm/pnpm, Maven, Gradle, Bazel, Meson, CMake, Autotools, Python packaging, and Make projects. The command reports its confidence and any ambiguous markers; low-confidence output guesses are called out explicitly rather than treated as authoritative. Review the generated `.reprobisect.toml` before the first build.
+
 Or create one yourself:
 
 ```toml
