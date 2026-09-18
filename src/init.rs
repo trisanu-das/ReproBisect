@@ -102,7 +102,7 @@ pub fn create_config(
                 let recommended = result
                     .candidates
                     .iter()
-                    .filter(|candidate| candidate.confidence != CandidateConfidence::Low)
+                    .filter(|candidate| candidate.confidence == CandidateConfidence::High)
                     .take(6)
                     .map(|candidate| candidate.path.clone())
                     .collect::<Vec<_>>();
@@ -130,13 +130,13 @@ pub fn create_config(
 
                 if recommended.is_empty() {
                     plan.notes.push(
-                        "temporary output discovery found no medium/high-confidence final artifact; kept static output inference"
+                        "temporary output discovery found no high-confidence final artifact; kept static output inference; medium/low-confidence candidates remain advisory"
                             .into(),
                     );
                 } else {
                     plan.outputs = recommended;
                     plan.notes.push(format!(
-                        "build.outputs selected from an explicit temporary-build probe ({} candidate{})",
+                        "build.outputs selected from high-confidence results of an explicit temporary-build probe ({} candidate{})",
                         plan.outputs.len(),
                         if plan.outputs.len() == 1 { "" } else { "s" }
                     ));

@@ -5,7 +5,7 @@
 - adds `reprobisect doctor` to validate project configuration and OCI runtime readiness before starting expensive rebuild experiments;
 - upgrades `reprobisect init` with deterministic build-system detection and editable image/command/output suggestions for Cargo, Go, npm/pnpm, Maven, Gradle, Bazel, Meson, CMake, Autotools, Python packaging, and Make projects;
 - reports init confidence and multi-marker ambiguity explicitly, while retaining low-confidence placeholders when a concrete artifact cannot be inferred safely;
-- adds opt-in `reprobisect init --discover-outputs`, which runs one detected build in a temporary OCI workspace, diffs produced files, filters common intermediates, ranks executable/archive/package candidates, and writes only medium/high-confidence candidates to `build.outputs`; `--runner docker|podman` controls both probing and the generated config;
+- adds opt-in `reprobisect init --discover-outputs`, which runs one detected build in a temporary OCI workspace, diffs produced files, filters common intermediates, ranks executable/archive/package candidates, and writes only high-confidence candidates to `build.outputs` while leaving weaker candidates advisory; `--runner docker|podman` controls both probing and the generated config;
 - redesigns the default text report around the diagnosis: result, cause, confidence, affected artifacts, baseline/variant/reversion hashes, evidence, remediation, and a compact tested-variable effect summary; full experiment/provenance detail remains available with `-v`;
 - provides text and JSON doctor reports with explicit PASS/WARN/FAIL/SKIP checks;
 - treats a missing local build image as a warning while treating an unavailable runner/runtime as not ready;

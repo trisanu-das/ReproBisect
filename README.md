@@ -171,7 +171,7 @@ When static output inference is ambiguous, you can opt into a single temporary c
 reprobisect init . --discover-outputs
 ```
 
-The probe snapshots a temporary workspace before and after the detected build, filters common intermediates, classifies executable/archive/package candidates, and uses only medium/high-confidence candidates for the generated `build.outputs`. It never builds in or mutates your checkout. Docker is the default runtime; use `--runner podman` to generate and probe with Podman instead.
+The probe snapshots a temporary workspace before and after the detected build, filters common intermediates, and classifies executable/archive/package candidates. The full ranked shortlist is printed, but only **high-confidence** candidates are allowed to replace the statically inferred `build.outputs`; medium/low-confidence candidates remain advisory. It never builds in or mutates your checkout. Docker is the default runtime; use `--runner podman` to generate and probe with Podman instead.
 
 Or create one yourself:
 
