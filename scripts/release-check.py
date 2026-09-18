@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = "1.0.0"
+EXPECTED_VERSION = "1.1.0-rc.1"
+EXPECTED_RELEASE_BRANCH = "develop/1.1.0"
+EXPECTED_TAG_GLOB = "v1.1.*"
 EXPECTED_RUST_VERSION = "1.85"
 EXPECTED_TOOLCHAIN = "1.85.1"
 EXPECTED_SCHEMAS = {
@@ -69,7 +71,7 @@ def check_package() -> list[str]:
     if package.get("rust-version") != EXPECTED_RUST_VERSION:
         raise RuntimeError(f"Cargo.toml rust-version must remain {EXPECTED_RUST_VERSION}")
     if package.get("publish") is not False:
-        raise RuntimeError("stable release must remain publish = false until crates.io policy is decided")
+        raise RuntimeError("release candidate must remain publish = false until crates.io policy is decided")
 
     toolchain = tomllib.loads((ROOT / "rust-toolchain.toml").read_text(encoding="utf-8"))
     if toolchain.get("toolchain", {}).get("channel") != EXPECTED_TOOLCHAIN:
@@ -95,7 +97,7 @@ def check_schemas() -> list[str]:
     for name, value in EXPECTED_SCHEMAS.items():
         if found.get(name) != value:
             raise RuntimeError(f"schema freeze violation: {name}={found.get(name)!r}, expected {value}")
-    return ["persisted evidence schema ranges are frozen for the 1.0 stable line"]
+    return ["persisted evidence schema ranges remain unchanged from the 1.0 stable line into 1.1"]
 
 
 def check_action_pins() -> list[str]:
@@ -121,6 +123,29 @@ def check_action_pins() -> list[str]:
     return [f"{checked} external GitHub Actions references are commit-pinned"]
 
 
+def check_release_workflow() -> list[str]:
+    path = ROOT / ".github" / "workflows" / "release.yml"
+    text = path.read_text(encoding="utf-8")
+    required = [
+        f"- '{EXPECTED_RELEASE_BRANCH}'",
+        f"- '{EXPECTED_TAG_GLOB}'",
+        "id: release_meta",
+        "steps.release_meta.outputs.version",
+        "Verify release tag matches package version",
+        "cancel-in-progress: true",
+    ]
+    missing = [value for value in required if value not in text]
+    if missing:
+        raise RuntimeError(
+            "release workflow is missing 1.1 candidate safeguards: " + ", ".join(missing)
+        )
+    if "reprobisect 1.0.0" in text or 'version="1.0.0"' in text:
+        raise RuntimeError("release workflow still hardcodes the 1.0.0 package version")
+    return [
+        f"release workflow targets {EXPECTED_RELEASE_BRANCH} / {EXPECTED_TAG_GLOB} and derives packaging version from Cargo.toml"
+    ]
+
+
 def check_required_files() -> list[str]:
     required = [
         "LICENSE",
@@ -143,6 +168,7 @@ def source_checks() -> tuple[list[str], list[dict[str, Any]]]:
     notes += check_package()
     notes += check_schemas()
     notes += check_action_pins()
+    notes += check_release_workflow()
     notes += check_required_files()
     commands.append(run([sys.executable, "scripts/static-check.py"]))
     commands.append(run([sys.executable, "scripts/real-world-corpus.py", "validate"]))

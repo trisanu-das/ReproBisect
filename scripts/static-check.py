@@ -338,8 +338,8 @@ def check_evidence_schema_matrix() -> None:
 
     cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
     version = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.MULTILINE)
-    if not version or version.group(1) != "1.0.0":
-        raise SystemExit("Phase 21 stable source must use crate version 1.0.0")
+    if not version or version.group(1) != "1.1.0-rc.1":
+        raise SystemExit("1.1 release-candidate source must use crate version 1.1.0-rc.1")
 
 def check_real_world_corpus() -> None:
     subprocess.run(
