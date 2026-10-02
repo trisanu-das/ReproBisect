@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:reprobisect:automation:v1",
+  "title": "ReproBisect CI automation envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation",
+    "diagnostic_status",
+    "completion",
+    "identities",
+    "report",
+    "coverage",
+    "policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "operation": {
+      "enum": [
+        "check",
+        "diagnose"
+      ]
+    },
+    "diagnostic_status": {
+      "anyOf": [
+        {
+          "enum": [
+            "reproducible",
+            "non_reproducible",
+            "uncontrolled_nondeterminism",
+            "inconclusive"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "completed",
+        "reason"
+      ],
+      "properties": {
+        "completed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "enum": [
+            "completed",
+            "incomplete_coverage",
+            "operational_error",
+            "usage_error"
+          ]
+        }
+      }
+    },
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binary_version",
+        "binary_sha256",
+        "effective_config_sha256",
+        "source_sha256",
+        "experiment_id"
+      ],
+      "properties": {
+        "binary_version": {
+          "type": "string"
+        },
+        "binary_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_config_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "experiment_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "report": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "sha256",
+            "schema_version"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^\\.reprobisect/experiments/[0-9a-f-]{36}\\.json$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "schema_version": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "coverage": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "complete",
+            "controls",
+            "interventions",
+            "interaction_search"
+          ],
+          "properties": {
+            "complete": {
+              "type": "boolean"
+            },
+            "controls": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "planned",
+                "attempted",
+                "completed",
+                "skipped",
+                "failed"
+              ],
+              "properties": {
+                "planned": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "attempted": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "completed": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "skipped": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "interventions": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "planned",
+                "attempted",
+                "completed",
+                "skipped",
+                "failed"
+              ],
+              "properties": {
+                "planned": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "attempted": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "completed": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "skipped": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "interaction_search": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "status",
+                "strategy",
+                "eligible_candidates",
+                "tested_subsets"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "disabled",
+                    "not_applicable",
+                    "blocked_unstable_baseline",
+                    "skipped_limit",
+                    "completed",
+                    "failed",
+                    "failed_or_missing"
+                  ]
+                },
+                "strategy": {
+                  "const": "combined_candidate_set_then_ddmin_not_exhaustive"
+                },
+                "eligible_candidates": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "tested_subsets": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "passed",
+        "diagnostic_exit_code",
+        "exit_code"
+      ],
+      "properties": {
+        "name": {
+          "enum": [
+            "require_reproducible",
+            "report_only"
+          ]
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "diagnostic_exit_code": {
+          "enum": [
+            0,
+            1,
+            2,
+            5
+          ]
+        },
+        "exit_code": {
+          "enum": [
+            0,
+            1,
+            2,
+            5
+          ]
+        }
+      }
+    }
+  }
+}

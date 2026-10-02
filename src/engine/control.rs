@@ -11,15 +11,16 @@ use crate::{
         diagnosis::synthesize_diagnoses,
         interventions::{
             PlannedIntervention, baseline_environment, combine_interventions,
-            eligible_for_interaction_search, plan_interventions,
+            is_interaction_candidate, plan_interventions,
         },
         statistics::assess_stochastic_effect,
     },
     evidence::{persist_build_failure, persist_report, persist_run},
     model::{
-        ArchiveMetadataDifference, ArchiveMetadataField, ArtifactDelta, ArtifactSemanticDifference, BuildRun, BuildSpec,
-        CheckReport, CheckStatus, ElfMarkerLocation, EmbeddedMarker, InteractionSearchResult, Intervention,
-        InterventionKind, InterventionResult, StochasticEffectClassification,
+        ArchiveMetadataDifference, ArchiveMetadataField, ArtifactDelta, ArtifactSemanticDifference,
+        BuildRun, BuildSpec, CheckReport, CheckStatus, ElfMarkerLocation, EmbeddedMarker,
+        InteractionSearchResult, Intervention, InterventionKind, InterventionResult,
+        StochasticEffectClassification,
     },
     runner::{RunOutcome, Runner, configured_runner},
     schema::CHECK_REPORT_SCHEMA_CURRENT,
@@ -120,8 +121,7 @@ pub fn check_project(
 
     let singles_changed = intervention_results.iter().any(|result| result.changed);
     let build_outcome_dependency = intervention_results.iter().any(|result| {
-        build_failure_is_observable(result.intervention.kind)
-            && !result.build_failures.is_empty()
+        build_failure_is_observable(result.intervention.kind) && !result.build_failures.is_empty()
     });
     let late_baseline_instability = intervention_results.iter().any(|result| {
         result.stochastic_effect.as_ref().is_some_and(|evidence| {
@@ -132,9 +132,7 @@ pub fn check_project(
     let eligible_candidates = planned
         .iter()
         .zip(intervention_results.iter())
-        .filter(|(planned, result)| {
-            eligible_for_interaction_search(planned) && !result.changed && result.error.is_none()
-        })
+        .filter(|(planned, result)| is_interaction_candidate(planned, result))
         .map(|(planned, _)| planned.clone())
         .collect::<Vec<_>>();
 
@@ -220,7 +218,9 @@ pub fn check_project(
     } else {
         vec![format!(
             "all declared artifacts and build-success outcomes were stable across controls and all {} successful configured one-variable interventions",
-            intervention_results.len().saturating_sub(failed_interventions)
+            intervention_results
+                .len()
+                .saturating_sub(failed_interventions)
         )]
     };
 
@@ -310,14 +310,8 @@ fn execute_intervention<R: Runner>(
     options: &CheckOptions,
     ordinal: &mut usize,
 ) -> Result<InterventionResult> {
-    let run_count = match planned.intervention.kind {
-        InterventionKind::CpuCount => options.stochastic_runs.max(options.intervention_runs),
-        InterventionKind::NetworkAccess
-        | InterventionKind::ToolchainExecutable
-        | InterventionKind::DependencyFile => options.intervention_runs.max(2),
-        InterventionKind::BuildImage => options.intervention_runs,
-        _ => options.intervention_runs,
-    };
+    let run_count =
+        super::interventions::intervention_trial_count(planned.intervention.kind, options);
     let mut intervention_runs = Vec::with_capacity(run_count);
     let mut reference_runs = if planned.intervention.kind == InterventionKind::CpuCount {
         Vec::with_capacity(run_count)
@@ -332,7 +326,13 @@ fn execute_intervention<R: Runner>(
         // trial. This limits simple temporal drift relative to collecting two
         // large blocks while preserving fixed, preconfigured sample sizes.
         for _ in 0..run_count {
-            match runner.run(spec, experiment_id, source_digest, *ordinal, baseline_environment) {
+            match runner.run(
+                spec,
+                experiment_id,
+                source_digest,
+                *ordinal,
+                baseline_environment,
+            ) {
                 Ok(run) => {
                     persist_run(project_root, &run)?;
                     reference_runs.push(run);
@@ -347,13 +347,21 @@ fn execute_intervention<R: Runner>(
             }
             *ordinal += 1;
 
-            match runner.run(spec, experiment_id, source_digest, *ordinal, &planned.environment) {
+            match runner.run(
+                spec,
+                experiment_id,
+                source_digest,
+                *ordinal,
+                &planned.environment,
+            ) {
                 Ok(run) => {
                     persist_run(project_root, &run)?;
                     intervention_runs.push(run);
                 }
                 Err(run_error) => {
-                    error = Some(format!("stochastic intervention build failed: {run_error:#}"));
+                    error = Some(format!(
+                        "stochastic intervention build failed: {run_error:#}"
+                    ));
                     *ordinal += 1;
                     break;
                 }
@@ -385,7 +393,13 @@ fn execute_intervention<R: Runner>(
                     }
                 }
             } else {
-                match runner.run(spec, experiment_id, source_digest, *ordinal, &planned.environment) {
+                match runner.run(
+                    spec,
+                    experiment_id,
+                    source_digest,
+                    *ordinal,
+                    &planned.environment,
+                ) {
                     Ok(run) => {
                         persist_run(project_root, &run)?;
                         intervention_runs.push(run);
@@ -404,7 +418,11 @@ fn execute_intervention<R: Runner>(
     let artifact_deltas = if intervention_runs.is_empty() {
         Vec::new()
     } else {
-        build_artifact_deltas(baseline_run, &intervention_runs, Some(&planned.intervention))
+        build_artifact_deltas(
+            baseline_run,
+            &intervention_runs,
+            Some(&planned.intervention),
+        )
     };
     let changed = intervention_runs
         .iter()
@@ -448,7 +466,13 @@ fn execute_intervention<R: Runner>(
     let mut confirmation_run = None;
     let mut reverted_to_baseline = None;
     if (changed || build_failure_effect) && options.confirmation_runs == 1 {
-        match runner.run(spec, experiment_id, source_digest, *ordinal, baseline_environment) {
+        match runner.run(
+            spec,
+            experiment_id,
+            source_digest,
+            *ordinal,
+            baseline_environment,
+        ) {
             Ok(run) => {
                 persist_run(project_root, &run)?;
                 reverted_to_baseline = Some(same_artifact_hashes(baseline_run, &run));
@@ -500,7 +524,10 @@ fn build_outcomes_stable(runs: &[BuildRun], failures: &[crate::model::BuildFailu
     let Some(first) = failures.first() else {
         return false;
     };
-    failures.iter().skip(1).all(|failure| failure.exit_code == first.exit_code)
+    failures
+        .iter()
+        .skip(1)
+        .all(|failure| failure.exit_code == first.exit_code)
 }
 
 fn build_outcome_count(runs: &[BuildRun], failures: &[crate::model::BuildFailure]) -> usize {
@@ -608,7 +635,13 @@ fn execute_interaction_search<R: Runner>(
     let mut confirmation_run = None;
     let mut reverted_to_baseline = None;
     if final_changed && final_stable && options.confirmation_runs == 1 {
-        let run = runner.run(spec, experiment_id, source_digest, *ordinal, baseline_environment)?;
+        let run = runner.run(
+            spec,
+            experiment_id,
+            source_digest,
+            *ordinal,
+            baseline_environment,
+        )?;
         persist_run(project_root, &run)?;
         reverted_to_baseline = Some(same_artifact_hashes(baseline_run, &run));
         confirmation_run = Some(run);
@@ -666,17 +699,22 @@ pub(crate) fn same_artifact_hashes(left: &BuildRun, right: &BuildRun) -> bool {
 }
 
 pub(crate) fn distinct_artifact_outcomes(runs: &[BuildRun]) -> usize {
-    runs.iter().map(artifact_signature).collect::<BTreeSet<_>>().len()
+    runs.iter()
+        .map(artifact_signature)
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 pub(crate) fn artifact_signature(run: &BuildRun) -> Vec<(String, String)> {
     let mut signature = run
         .artifacts
         .iter()
-        .map(|artifact| (
-            artifact.logical_path.to_string_lossy().into_owned(),
-            artifact.sha256.clone(),
-        ))
+        .map(|artifact| {
+            (
+                artifact.logical_path.to_string_lossy().into_owned(),
+                artifact.sha256.clone(),
+            )
+        })
         .collect::<Vec<_>>();
     signature.sort();
     signature
@@ -746,11 +784,9 @@ pub(crate) fn build_artifact_deltas(
                     elf_marker_location_evidence.extend(baseline_elf_locations);
 
                     for run in all_variant_runs {
-                        if let Some(artifact) = run
-                            .artifacts
-                            .iter()
-                            .find(|artifact| artifact.logical_path == baseline_artifact.logical_path)
-                        {
+                        if let Some(artifact) = run.artifacts.iter().find(|artifact| {
+                            artifact.logical_path == baseline_artifact.logical_path
+                        }) {
                             let variant_markers = artifact
                                 .embedded_markers
                                 .iter()
@@ -787,7 +823,8 @@ pub(crate) fn build_artifact_deltas(
                         baseline_artifact.archive_metadata.as_ref(),
                         variant_artifact.archive_metadata.as_ref(),
                     ) {
-                        archive_metadata_evidence = compare_archive_metadata(baseline_metadata, variant_metadata);
+                        archive_metadata_evidence =
+                            compare_archive_metadata(baseline_metadata, variant_metadata);
                         if let Some(intervention) = intervention {
                             direct_structural_evidence = archive_evidence_matches_intervention(
                                 intervention,
@@ -799,7 +836,8 @@ pub(crate) fn build_artifact_deltas(
                         baseline_artifact.semantic_metadata.as_ref(),
                         variant_artifact.semantic_metadata.as_ref(),
                     ) {
-                        semantic_evidence = compare_semantic_metadata(baseline_semantic, variant_semantic);
+                        semantic_evidence =
+                            compare_semantic_metadata(baseline_semantic, variant_semantic);
                         if let Some(intervention) = intervention {
                             direct_structural_evidence |= semantic_evidence_matches_intervention(
                                 intervention,
@@ -863,7 +901,9 @@ fn semantic_evidence_matches_intervention(
 
 fn sort_and_dedup_markers(markers: &mut Vec<EmbeddedMarker>) {
     markers.sort_by(|left, right| {
-        left.variable.cmp(&right.variable).then_with(|| left.value.cmp(&right.value))
+        left.variable
+            .cmp(&right.variable)
+            .then_with(|| left.value.cmp(&right.value))
     });
     markers.dedup();
 }
@@ -922,9 +962,16 @@ mod tests {
 
     #[test]
     fn narrow_input_build_failure_is_an_observable_but_not_a_byte_delta() {
-        assert!(build_failure_is_observable(InterventionKind::ToolchainExecutable));
-        assert!(build_failure_is_observable(InterventionKind::DependencyFile));
-        assert_eq!(classify_status(false, true, 0, false), CheckStatus::Inconclusive);
+        assert!(build_failure_is_observable(
+            InterventionKind::ToolchainExecutable
+        ));
+        assert!(build_failure_is_observable(
+            InterventionKind::DependencyFile
+        ));
+        assert_eq!(
+            classify_status(false, true, 0, false),
+            CheckStatus::Inconclusive
+        );
     }
 
     #[test]

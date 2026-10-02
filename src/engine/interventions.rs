@@ -18,9 +18,25 @@ pub struct PlannedIntervention {
     pub environment: ControlledEnvironment,
 }
 
+pub(crate) fn intervention_trial_count(
+    kind: InterventionKind,
+    options: &crate::engine::CheckOptions,
+) -> usize {
+    match kind {
+        InterventionKind::CpuCount => options.stochastic_runs.max(options.intervention_runs),
+        InterventionKind::NetworkAccess
+        | InterventionKind::ToolchainExecutable
+        | InterventionKind::DependencyFile => options.intervention_runs.max(2),
+        _ => options.intervention_runs,
+    }
+}
+
 pub fn baseline_environment(config: &Config) -> ControlledEnvironment {
     let mut environment = BTreeMap::new();
-    environment.insert("SOURCE_DATE_EPOCH".to_string(), BASELINE_SOURCE_DATE_EPOCH.to_string());
+    environment.insert(
+        "SOURCE_DATE_EPOCH".to_string(),
+        BASELINE_SOURCE_DATE_EPOCH.to_string(),
+    );
     environment.insert("TZ".to_string(), "UTC".to_string());
     environment.insert("LANG".to_string(), "C".to_string());
     environment.insert("LC_ALL".to_string(), "C".to_string());
@@ -60,7 +76,11 @@ pub fn baseline_environment(config: &Config) -> ControlledEnvironment {
             .dimensions
             .source_mtime
             .then_some(BASELINE_SOURCE_MTIME_EPOCH),
-        umask: config.experiments.dimensions.umask.then_some(BASELINE_UMASK),
+        umask: config
+            .experiments
+            .dimensions
+            .umask
+            .then_some(BASELINE_UMASK),
         network_mode: "default".to_string(),
         network_trace: config.experiments.network_trace,
         file_input_trace: config.experiments.file_input_trace,
@@ -163,7 +183,9 @@ pub fn plan_interventions(
                 variable: "source_path".to_string(),
                 baseline_value: baseline.container_source_path.clone(),
                 variant_value: environment.container_source_path.clone(),
-                description: "expose the same source snapshot at a different in-container source path".to_string(),
+                description:
+                    "expose the same source snapshot at a different in-container source path"
+                        .to_string(),
             },
             environment,
         });
@@ -214,7 +236,8 @@ pub fn plan_interventions(
                 variable: "source_mtime".to_string(),
                 baseline_value: BASELINE_SOURCE_MTIME_EPOCH.to_string(),
                 variant_value: VARIANT_SOURCE_MTIME_EPOCH.to_string(),
-                description: "change copied source-tree mtimes while keeping source bytes fixed".to_string(),
+                description: "change copied source-tree mtimes while keeping source bytes fixed"
+                    .to_string(),
             },
             environment,
         });
@@ -222,7 +245,9 @@ pub fn plan_interventions(
 
     if dimensions.timezone {
         let mut environment = baseline.clone();
-        environment.environment.insert("TZ".to_string(), "HST10".to_string());
+        environment
+            .environment
+            .insert("TZ".to_string(), "HST10".to_string());
         planned.push(PlannedIntervention {
             intervention: Intervention {
                 id: "timezone".to_string(),
@@ -230,7 +255,8 @@ pub fn plan_interventions(
                 variable: "TZ".to_string(),
                 baseline_value: "UTC".to_string(),
                 variant_value: "HST10".to_string(),
-                description: "change process timezone while keeping source and toolchain fixed".to_string(),
+                description: "change process timezone while keeping source and toolchain fixed"
+                    .to_string(),
             },
             environment,
         });
@@ -238,8 +264,12 @@ pub fn plan_interventions(
 
     if dimensions.locale {
         let mut environment = baseline.clone();
-        environment.environment.insert("LANG".to_string(), "C.UTF-8".to_string());
-        environment.environment.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
+        environment
+            .environment
+            .insert("LANG".to_string(), "C.UTF-8".to_string());
+        environment
+            .environment
+            .insert("LC_ALL".to_string(), "C.UTF-8".to_string());
         planned.push(PlannedIntervention {
             intervention: Intervention {
                 id: "locale".to_string(),
@@ -247,7 +277,8 @@ pub fn plan_interventions(
                 variable: "locale".to_string(),
                 baseline_value: "C".to_string(),
                 variant_value: "C.UTF-8".to_string(),
-                description: "change process locale while keeping other controlled inputs fixed".to_string(),
+                description: "change process locale while keeping other controlled inputs fixed"
+                    .to_string(),
             },
             environment,
         });
@@ -261,7 +292,10 @@ pub fn plan_interventions(
                 id: "hostname".to_string(),
                 kind: InterventionKind::Hostname,
                 variable: "hostname".to_string(),
-                baseline_value: baseline.hostname.clone().unwrap_or_else(|| "<default>".to_string()),
+                baseline_value: baseline
+                    .hostname
+                    .clone()
+                    .unwrap_or_else(|| "<default>".to_string()),
                 variant_value: "reprobisect-variant".to_string(),
                 description: "change the container hostname".to_string(),
             },
@@ -279,7 +313,8 @@ pub fn plan_interventions(
                 variable: "cpu_count".to_string(),
                 baseline_value: "1".to_string(),
                 variant_value: "2".to_string(),
-                description: "change the container CPU quota and REPROBISECT_CPU_COUNT hint".to_string(),
+                description: "change the container CPU quota and REPROBISECT_CPU_COUNT hint"
+                    .to_string(),
             },
             environment,
         });
@@ -319,7 +354,9 @@ pub fn plan_interventions(
 
     for (key, values) in &config.experiments.environment_variables {
         let mut environment = baseline.clone();
-        environment.environment.insert(key.clone(), values[1].clone());
+        environment
+            .environment
+            .insert(key.clone(), values[1].clone());
         planned.push(PlannedIntervention {
             intervention: Intervention {
                 id: format!("env-{key}"),
@@ -356,7 +393,9 @@ pub fn combine_interventions(
         }
         for (key, value) in &planned.environment.toolchain_bindings {
             if baseline.toolchain_bindings.get(key) != Some(value) {
-                combined.toolchain_bindings.insert(key.clone(), value.clone());
+                combined
+                    .toolchain_bindings
+                    .insert(key.clone(), value.clone());
             }
         }
         for (target, variant_file) in &planned.environment.source_file_overrides {
@@ -390,8 +429,11 @@ pub fn combine_interventions(
         if planned.environment.syscall_trace_max_bytes != baseline.syscall_trace_max_bytes {
             combined.syscall_trace_max_bytes = planned.environment.syscall_trace_max_bytes;
         }
-        if planned.environment.runtime_dependency_provenance != baseline.runtime_dependency_provenance {
-            combined.runtime_dependency_provenance = planned.environment.runtime_dependency_provenance;
+        if planned.environment.runtime_dependency_provenance
+            != baseline.runtime_dependency_provenance
+        {
+            combined.runtime_dependency_provenance =
+                planned.environment.runtime_dependency_provenance;
         }
         if planned.environment.dependency_cache_paths != baseline.dependency_cache_paths {
             combined.dependency_cache_paths = planned.environment.dependency_cache_paths.clone();
@@ -411,6 +453,13 @@ pub fn combine_interventions(
     combined
 }
 
+pub fn is_interaction_candidate(
+    planned: &PlannedIntervention,
+    result: &crate::model::InterventionResult,
+) -> bool {
+    eligible_for_interaction_search(planned) && !result.changed && result.error.is_none()
+}
+
 pub fn eligible_for_interaction_search(intervention: &PlannedIntervention) -> bool {
     !matches!(
         intervention.intervention.kind,
@@ -428,16 +477,22 @@ mod tests {
 
     #[test]
     fn baseline_pins_core_environment() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
             outputs = ["out"]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let baseline = baseline_environment(&config);
         assert_eq!(baseline.environment["TZ"], "UTC");
         assert_eq!(baseline.environment["LC_ALL"], "C");
-        assert_eq!(baseline.environment["SOURCE_DATE_EPOCH"], BASELINE_SOURCE_DATE_EPOCH);
+        assert_eq!(
+            baseline.environment["SOURCE_DATE_EPOCH"],
+            BASELINE_SOURCE_DATE_EPOCH
+        );
         assert_eq!(baseline.image_override, None);
         assert_eq!(baseline.container_source_path, "/src");
         assert_eq!(baseline.container_work_path, "/workspace");
@@ -452,7 +507,8 @@ mod tests {
 
     #[test]
     fn plans_image_and_network_interventions() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
@@ -468,12 +524,20 @@ mod tests {
             timezone = false
             locale = false
             hostname = false
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let baseline = baseline_environment(&config);
         let planned = plan_interventions(&config, &baseline);
-        let image = planned.iter().find(|p| p.intervention.kind == InterventionKind::BuildImage).unwrap();
+        let image = planned
+            .iter()
+            .find(|p| p.intervention.kind == InterventionKind::BuildImage)
+            .unwrap();
         assert_eq!(image.environment.image_override.as_deref(), Some("gcc:15"));
-        let network = planned.iter().find(|p| p.intervention.kind == InterventionKind::NetworkAccess).unwrap();
+        let network = planned
+            .iter()
+            .find(|p| p.intervention.kind == InterventionKind::NetworkAccess)
+            .unwrap();
         assert_eq!(network.environment.network_mode, "none");
         assert!(!eligible_for_interaction_search(image));
         assert!(!eligible_for_interaction_search(network));
@@ -481,7 +545,8 @@ mod tests {
 
     #[test]
     fn plans_narrow_toolchain_and_dependency_file_interventions() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
@@ -494,7 +559,9 @@ mod tests {
             id = "requirements"
             target = "requirements.txt"
             variant_file = "requirements.variant.txt"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let baseline = baseline_environment(&config);
         assert_eq!(baseline.toolchain_bindings["CC"], "gcc");
         let planned = plan_interventions(&config, &baseline);
@@ -521,7 +588,8 @@ mod tests {
 
     #[test]
     fn source_and_build_path_interventions_are_independent() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
@@ -534,7 +602,9 @@ mod tests {
             timezone = false
             locale = false
             hostname = false
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let baseline = baseline_environment(&config);
         let planned = plan_interventions(&config, &baseline);
 
@@ -542,24 +612,43 @@ mod tests {
             .iter()
             .find(|planned| planned.intervention.kind == InterventionKind::SourcePath)
             .unwrap();
-        assert_ne!(source_path.environment.container_source_path, baseline.container_source_path);
-        assert_eq!(source_path.environment.container_work_path, baseline.container_work_path);
+        assert_ne!(
+            source_path.environment.container_source_path,
+            baseline.container_source_path
+        );
+        assert_eq!(
+            source_path.environment.container_work_path,
+            baseline.container_work_path
+        );
 
         let build_path = planned
             .iter()
             .find(|planned| planned.intervention.kind == InterventionKind::BuildPath)
             .unwrap();
-        assert_eq!(build_path.environment.container_source_path, baseline.container_source_path);
-        assert_ne!(build_path.environment.container_work_path, baseline.container_work_path);
+        assert_eq!(
+            build_path.environment.container_source_path,
+            baseline.container_source_path
+        );
+        assert_ne!(
+            build_path.environment.container_work_path,
+            baseline.container_work_path
+        );
 
         let combined = combine_interventions(&baseline, &[source_path.clone(), build_path.clone()]);
-        assert_eq!(combined.container_source_path, source_path.environment.container_source_path);
-        assert_eq!(combined.container_work_path, build_path.environment.container_work_path);
+        assert_eq!(
+            combined.container_source_path,
+            source_path.environment.container_source_path
+        );
+        assert_eq!(
+            combined.container_work_path,
+            build_path.environment.container_work_path
+        );
     }
 
     #[test]
     fn source_mtime_and_umask_baselines_are_opt_in() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
@@ -568,15 +657,21 @@ mod tests {
             [experiments.dimensions]
             source_mtime = true
             umask = true
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let baseline = baseline_environment(&config);
-        assert_eq!(baseline.source_mtime_epoch, Some(BASELINE_SOURCE_MTIME_EPOCH));
+        assert_eq!(
+            baseline.source_mtime_epoch,
+            Some(BASELINE_SOURCE_MTIME_EPOCH)
+        );
         assert_eq!(baseline.umask, Some(BASELINE_UMASK));
     }
 
     #[test]
     fn combines_independent_interventions_without_reverting_each_other() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
@@ -591,7 +686,9 @@ mod tests {
             source_mtime = false
             cpu_count = false
             umask = false
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let baseline = baseline_environment(&config);
         let planned = plan_interventions(&config, &baseline);
         let combined = combine_interventions(&baseline, &planned);

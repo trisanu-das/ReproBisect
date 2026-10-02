@@ -3,7 +3,7 @@ mod control;
 mod ddmin;
 mod diagnosis;
 mod fix;
-mod interventions;
+pub(crate) mod interventions;
 mod statistics;
 
 pub use compare::{CompareOptions, compare_environments};

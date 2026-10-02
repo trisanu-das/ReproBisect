@@ -45,6 +45,8 @@ jobs:
         with:
           toolchain: 1.85.1
       - run: ./scripts/test-fixtures.sh
+      - name: CI envelope real-container subprocess contract
+        run: cargo test --locked --test cli ci_live_ -- --ignored
 
   podman:
     runs-on: ubuntu-latest

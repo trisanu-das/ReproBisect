@@ -1,4 +1,8 @@
-use std::{fs, io::{self, Write}, path::PathBuf};
+use std::{
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -9,9 +13,11 @@ use crate::{
     compat,
     config::Config,
     doctor,
-    init,
-    engine::{CompareOptions, CheckOptions, FixOptions, check_project, compare_environments, fix_project},
+    engine::{
+        CheckOptions, CompareOptions, FixOptions, check_project, compare_environments, fix_project,
+    },
     environment::EnvironmentManifest,
+    init,
     model::RunnerBackend,
     report,
 };
@@ -102,6 +108,13 @@ pub struct DoctorArgs {
 
 #[derive(Debug, Args)]
 pub struct CheckArgs {
+    /// Emit a versioned JSON automation envelope instead of the ordinary report.
+    #[arg(long)]
+    pub ci: bool,
+    /// CI job policy; diagnostic status is never rewritten.
+    #[arg(long, value_enum, requires = "ci")]
+    pub ci_policy: Option<crate::ci::CiPolicy>,
+
     /// Project directory containing .reprobisect.toml.
     #[arg(default_value = ".")]
     pub project: PathBuf,
@@ -212,15 +225,28 @@ pub struct FixArgs {
 }
 
 pub fn run_init(args: InitArgs) -> Result<()> {
-    let project = fs::canonicalize(&args.project)
-        .with_context(|| format!("cannot resolve project directory {}", args.project.display()))?;
-    init::create_config(&project, args.force, args.discover_outputs, args.runner.into())?;
+    let project = fs::canonicalize(&args.project).with_context(|| {
+        format!(
+            "cannot resolve project directory {}",
+            args.project.display()
+        )
+    })?;
+    init::create_config(
+        &project,
+        args.force,
+        args.discover_outputs,
+        args.runner.into(),
+    )?;
     Ok(())
 }
 
 pub fn run_doctor(args: DoctorArgs) -> Result<()> {
-    let project = fs::canonicalize(&args.project)
-        .with_context(|| format!("cannot resolve project directory {}", args.project.display()))?;
+    let project = fs::canonicalize(&args.project).with_context(|| {
+        format!(
+            "cannot resolve project directory {}",
+            args.project.display()
+        )
+    })?;
     let report_data = doctor::inspect_project(&project);
 
     match args.format {
@@ -233,16 +259,22 @@ pub fn run_doctor(args: DoctorArgs) -> Result<()> {
     }
 
     if !report_data.ready {
-        io::stdout().flush().context("cannot flush doctor report output")?;
+        io::stdout()
+            .flush()
+            .context("cannot flush doctor report output")?;
         std::process::exit(EXIT_DIAGNOSTIC);
     }
 
     Ok(())
 }
 
-pub fn run_check(args: CheckArgs) -> Result<()> {
-    let project = fs::canonicalize(&args.project)
-        .with_context(|| format!("cannot resolve project directory {}", args.project.display()))?;
+pub fn run_check(args: CheckArgs, operation: &'static str) -> Result<()> {
+    let project = fs::canonicalize(&args.project).with_context(|| {
+        format!(
+            "cannot resolve project directory {}",
+            args.project.display()
+        )
+    })?;
     let config = Config::load(&project)?;
 
     let options = CheckOptions {
@@ -262,6 +294,20 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
     validate_check_options(&options)?;
 
     let report_data = check_project(&project, &config, &options)?;
+
+    if args.ci {
+        let mut envelope = crate::ci::from_report(
+            &project,
+            &report_data,
+            &config,
+            &options,
+            args.ci_policy.unwrap_or_default(),
+        )?;
+        envelope.operation = operation;
+        let exit_code = envelope.policy.exit_code;
+        report::print_automation_json(&envelope)?;
+        std::process::exit(exit_code);
+    }
 
     match args.format {
         OutputFormat::Text => report::print_text(&report_data, args.verbose),
@@ -283,10 +329,13 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
     Ok(())
 }
 
-
 pub fn run_compare(args: CompareArgs) -> Result<()> {
-    let project = fs::canonicalize(&args.project)
-        .with_context(|| format!("cannot resolve project directory {}", args.project.display()))?;
+    let project = fs::canonicalize(&args.project).with_context(|| {
+        format!(
+            "cannot resolve project directory {}",
+            args.project.display()
+        )
+    })?;
     let config = Config::load(&project)?;
     let good_path = if args.good.is_absolute() {
         args.good.clone()
@@ -322,15 +371,21 @@ pub fn run_compare(args: CompareArgs) -> Result<()> {
         | crate::model::EnvironmentComparisonStatus::Inconclusive => EXIT_DIAGNOSTIC,
     };
     if code != 0 {
-        io::stdout().flush().context("cannot flush comparison report output")?;
+        io::stdout()
+            .flush()
+            .context("cannot flush comparison report output")?;
         std::process::exit(code);
     }
     Ok(())
 }
 
 pub fn run_fix(args: FixArgs) -> Result<()> {
-    let project = fs::canonicalize(&args.project)
-        .with_context(|| format!("cannot resolve project directory {}", args.project.display()))?;
+    let project = fs::canonicalize(&args.project).with_context(|| {
+        format!(
+            "cannot resolve project directory {}",
+            args.project.display()
+        )
+    })?;
     let config = Config::load(&project)?;
 
     let check = CheckOptions {
@@ -362,13 +417,18 @@ pub fn run_fix(args: FixArgs) -> Result<()> {
     let success = if fix_report.diagnosis.status == crate::model::CheckStatus::Reproducible {
         true
     } else if args.verify {
-        fix_report.verifications.iter().any(|verification| verification.verified)
+        fix_report
+            .verifications
+            .iter()
+            .any(|verification| verification.verified)
     } else {
         !fix_report.candidates.is_empty()
     };
 
     if !success {
-        io::stdout().flush().context("cannot flush fix report output")?;
+        io::stdout()
+            .flush()
+            .context("cannot flush fix report output")?;
         std::process::exit(EXIT_DIAGNOSTIC);
     }
 
@@ -388,10 +448,17 @@ pub fn run_evidence(args: EvidenceArgs) -> Result<()> {
             println!("file: {}", loaded.source_path.display());
             println!("kind: {}", loaded.summary.kind.label());
             println!("source schema: {}", loaded.summary.source_schema_version);
-            println!("current schema: {}", loaded.summary.normalized_schema_version);
+            println!(
+                "current schema: {}",
+                loaded.summary.normalized_schema_version
+            );
             println!(
                 "migration: {}",
-                if loaded.summary.migrated { "APPLIED" } else { "NOT REQUIRED" }
+                if loaded.summary.migrated {
+                    "APPLIED"
+                } else {
+                    "NOT REQUIRED"
+                }
             );
             println!(
                 "build/run-failure records migrated: {}",

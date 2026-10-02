@@ -153,7 +153,10 @@ pub fn print_text(report: &CheckReport, verbose: bool) {
         println!();
         println!("interventions:");
         for result in &report.interventions {
-            let outcome = if result.error.is_some() && result.runs.is_empty() && result.build_failures.is_empty() {
+            let outcome = if result.error.is_some()
+                && result.runs.is_empty()
+                && result.build_failures.is_empty()
+            {
                 "ERROR"
             } else if !result.build_failures.is_empty() && !result.runs.is_empty() {
                 "MIXED"
@@ -286,7 +289,6 @@ pub fn print_text(report: &CheckReport, verbose: bool) {
     }
 }
 
-
 fn print_diagnosis_summary(report: &CheckReport) {
     println!("ReproBisect diagnosis");
     println!("result: {}", check_status_label(&report.status));
@@ -299,7 +301,11 @@ fn print_diagnosis_summary(report: &CheckReport) {
     println!(
         "controls: {} run(s), {}",
         report.runs.len(),
-        if controls_stable { "stable" } else { "not stable" }
+        if controls_stable {
+            "stable"
+        } else {
+            "not stable"
+        }
     );
 
     if report.diagnoses.is_empty() {
@@ -327,13 +333,21 @@ fn print_diagnosis_summary(report: &CheckReport) {
             }
             println!(
                 "causal variable{}: {}",
-                if diagnosis.causal_variables.len() == 1 { "" } else { "s" },
+                if diagnosis.causal_variables.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
                 diagnosis.causal_variables.join(", ")
             );
             if !diagnosis.affected_artifacts.is_empty() {
                 println!(
                     "artifact{}: {}",
-                    if diagnosis.affected_artifacts.len() == 1 { "" } else { "s" },
+                    if diagnosis.affected_artifacts.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                     diagnosis
                         .affected_artifacts
                         .iter()
@@ -356,7 +370,10 @@ fn print_diagnosis_summary(report: &CheckReport) {
                             println!("  reversion: {} (confirmed)", short_hash(hash))
                         }
                         Some((hash, false)) => {
-                            println!("  reversion: {} (did not recover baseline)", short_hash(hash))
+                            println!(
+                                "  reversion: {} (did not recover baseline)",
+                                short_hash(hash)
+                            )
                         }
                         None => println!("  reversion: <not recorded>"),
                     }
@@ -433,7 +450,10 @@ fn diagnosed_artifact_hashes<'a>(
     artifact: &std::path::Path,
 ) -> Option<(&'a str, &'a str, Option<(&'a str, bool)>)> {
     for result in &report.interventions {
-        if !variables.iter().any(|variable| variable == &result.intervention.variable) {
+        if !variables
+            .iter()
+            .any(|variable| variable == &result.intervention.variable)
+        {
             continue;
         }
         let Some(delta) = result
@@ -629,7 +649,9 @@ pub fn print_compare_text(report: &EnvironmentComparisonReport, verbose: bool) {
     println!();
     match report.status {
         EnvironmentComparisonStatus::Equivalent => println!("status: ENVIRONMENTS_EQUIVALENT"),
-        EnvironmentComparisonStatus::Minimized => println!("status: BAD_ENVIRONMENT_DELTA_MINIMIZED"),
+        EnvironmentComparisonStatus::Minimized => {
+            println!("status: BAD_ENVIRONMENT_DELTA_MINIMIZED")
+        }
         EnvironmentComparisonStatus::Inconclusive => println!("status: INCONCLUSIVE"),
     }
     for note in &report.notes {
@@ -639,6 +661,38 @@ pub fn print_compare_text(report: &EnvironmentComparisonReport, verbose: bool) {
 
 pub fn print_compare_json(report: &EnvironmentComparisonReport) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(report)?);
+    Ok(())
+}
+
+/// Once emission is attempted, the transport may contain a prefix. Never retry
+/// with another document, including when the failure occurs during flush.
+#[derive(Debug)]
+pub(crate) struct AutomationOutputError(std::io::Error);
+
+impl std::fmt::Display for AutomationOutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot emit CI stdout: {}", self.0)
+    }
+}
+
+impl std::error::Error for AutomationOutputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+pub fn print_automation_json(envelope: &crate::ci::CiEnvelope) -> Result<()> {
+    write_automation_json(envelope, &mut std::io::stdout().lock())
+}
+
+pub(crate) fn write_automation_json(
+    envelope: &crate::ci::CiEnvelope,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
+    let mut bytes = serde_json::to_vec(envelope)?;
+    bytes.push(b'\n');
+    output.write_all(&bytes).map_err(AutomationOutputError)?;
+    output.flush().map_err(AutomationOutputError)?;
     Ok(())
 }
 
@@ -653,16 +707,32 @@ fn print_run_logs(run: &crate::model::BuildRun) {
             "  log capture: cap={} bytes/stream stdout={} bytes{} stderr={} bytes{} (full stream SHA-256 retained)",
             run.log_capture_max_bytes,
             run.stdout_bytes,
-            if run.stdout_truncated { " [text truncated]" } else { "" },
+            if run.stdout_truncated {
+                " [text truncated]"
+            } else {
+                ""
+            },
             run.stderr_bytes,
-            if run.stderr_truncated { " [text truncated]" } else { "" },
+            if run.stderr_truncated {
+                " [text truncated]"
+            } else {
+                ""
+            },
         );
     }
     if !run.stdout.is_empty() {
-        println!("  --- run {} stdout ---\n{}", run.ordinal, indent(&run.stdout, "  "));
+        println!(
+            "  --- run {} stdout ---\n{}",
+            run.ordinal,
+            indent(&run.stdout, "  ")
+        );
     }
     if !run.stderr.is_empty() {
-        println!("  --- run {} stderr ---\n{}", run.ordinal, indent(&run.stderr, "  "));
+        println!(
+            "  --- run {} stderr ---\n{}",
+            run.ordinal,
+            indent(&run.stderr, "  ")
+        );
     }
 }
 
@@ -680,9 +750,17 @@ fn print_failure_logs(failure: &crate::model::BuildFailure) {
             "  log capture: cap={} bytes/stream stdout={} bytes{} stderr={} bytes{} (full stream SHA-256 retained)",
             failure.log_capture_max_bytes,
             failure.stdout_bytes,
-            if failure.stdout_truncated { " [text truncated]" } else { "" },
+            if failure.stdout_truncated {
+                " [text truncated]"
+            } else {
+                ""
+            },
             failure.stderr_bytes,
-            if failure.stderr_truncated { " [text truncated]" } else { "" },
+            if failure.stderr_truncated {
+                " [text truncated]"
+            } else {
+                ""
+            },
         );
     }
     if !failure.stdout.is_empty() {
@@ -829,13 +907,13 @@ fn print_process_trace(trace: &crate::model::ProcessTraceSummary) {
         );
     }
     if trace.truncated {
-        println!("    note: trace parsing was truncated; observed process correlations are incomplete");
+        println!(
+            "    note: trace parsing was truncated; observed process correlations are incomplete"
+        );
     }
 }
 
-fn print_runtime_dependency_provenance(
-    provenance: &crate::model::RuntimeDependencyProvenance,
-) {
+fn print_runtime_dependency_provenance(provenance: &crate::model::RuntimeDependencyProvenance) {
     if !provenance.attempted {
         return;
     }
@@ -896,7 +974,9 @@ fn print_runtime_dependency_provenance(
             correlation.build_window_cooccurrence,
         );
         if correlation.build_window_cooccurrence {
-            println!("      note: co-occurrence does not identify which network response, if any, produced any cached byte");
+            println!(
+                "      note: co-occurrence does not identify which network response, if any, produced any cached byte"
+            );
         }
     }
     if let Some(error) = &provenance.error {
@@ -975,8 +1055,11 @@ pub fn print_fix_text(report: &crate::engine::FixReport, verbose: bool) {
                     "     expected sha256: {}",
                     patch.expected_sha256.as_deref().unwrap_or("<new file>")
                 );
-                println!("     unified diff:
-{}", indent(&patch.unified_diff, "       "));
+                println!(
+                    "     unified diff:
+{}",
+                    indent(&patch.unified_diff, "       ")
+                );
             }
             for evidence in &candidate.evidence {
                 println!("     evidence: {evidence}");
