@@ -682,7 +682,21 @@ impl std::error::Error for AutomationOutputError {
 }
 
 pub fn print_automation_json(envelope: &crate::ci::CiEnvelope) -> Result<()> {
-    write_automation_json(envelope, &mut std::io::stdout().lock())
+    #[cfg(unix)]
+    use std::os::fd::AsFd;
+    #[cfg(windows)]
+    use std::os::windows::io::AsHandle;
+
+    let stdout = std::io::stdout();
+    let lock = stdout.lock();
+    // Stdout suppresses EBADF on Unix. Keep its lock for emission, but write
+    // through an owned duplicate so errors propagate without closing stdout.
+    #[cfg(unix)]
+    let owned = lock.as_fd().try_clone_to_owned();
+    #[cfg(windows)]
+    let owned = lock.as_handle().try_clone_to_owned();
+    let mut output = std::fs::File::from(owned.map_err(AutomationOutputError)?);
+    write_automation_json(envelope, &mut output)
 }
 
 pub(crate) fn write_automation_json(
