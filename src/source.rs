@@ -42,9 +42,14 @@ const DEPENDENCY_MANIFEST_NAMES: &[&str] = &[
 /// Go, Bundler, Composer, and Gradle), also persist only a privacy-preserving
 /// package-count plus a hash of normalized name/version coordinates. These records describe the declared dependency snapshot; they
 /// are not proof that a build resolved no additional network inputs.
-pub fn collect_source_provenance(root: &Path) -> Result<SourceProvenance> {
-    let (git_commit, git_dirty) = git_provenance(root);
-    let (dependency_files, dependency_resolutions) = collect_dependency_provenance(root)?;
+pub fn collect_source_provenance(
+    root: &Path,
+    context: &crate::engine::budget::ExecutionContext,
+) -> Result<SourceProvenance> {
+    let (git_commit, git_dirty) = git_provenance(root, context);
+    context.check()?;
+    let (dependency_files, dependency_resolutions) =
+        collect_dependency_provenance_checked(root, &|| context.check())?;
 
     Ok(SourceProvenance {
         git_commit,
@@ -60,10 +65,21 @@ pub fn collect_source_provenance(root: &Path) -> Result<SourceProvenance> {
 pub fn collect_dependency_provenance(
     root: &Path,
 ) -> Result<(Vec<DependencyFileRecord>, Vec<DependencyResolutionRecord>)> {
+    collect_dependency_provenance_checked(root, &|| Ok(()))
+}
+fn collect_dependency_provenance_checked(
+    root: &Path,
+    check: &impl Fn() -> Result<()>,
+) -> Result<(Vec<DependencyFileRecord>, Vec<DependencyResolutionRecord>)> {
+    check()?;
     let mut dependency_files = Vec::new();
 
-    for (relative, absolute) in collect_entries(root)? {
-        let basename = relative.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    for (relative, absolute) in collect_entries(root, check)? {
+        check()?;
+        let basename = relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         let matches = DEPENDENCY_MANIFEST_NAMES.iter().any(|candidate| {
             if candidate.contains('/') {
                 relative.ends_with(Path::new(candidate))
@@ -82,7 +98,7 @@ pub fn collect_dependency_provenance(
         }
         dependency_files.push(DependencyFileRecord {
             path: relative,
-            sha256: sha256_file(&absolute)?,
+            sha256: sha256_file_checked(&absolute, check)?,
             size_bytes: metadata.len(),
         });
     }
@@ -138,7 +154,9 @@ fn parse_dependency_resolution(root: &Path, relative: &Path) -> Option<Dependenc
             normalized_sha256: None,
             // Never persist parser diagnostics: parser errors may include private
             // dependency names, registry URLs, or source snippets.
-            error: Some(format!("{ecosystem} dependency declaration could not be parsed")),
+            error: Some(format!(
+                "{ecosystem} dependency declaration could not be parsed"
+            )),
         },
     })
 }
@@ -154,9 +172,15 @@ fn parse_cargo_lock(path: &Path) -> Result<Vec<String>> {
         .ok_or_else(|| anyhow::anyhow!("Cargo.lock has no package array"))?;
     let mut coordinates = Vec::new();
     for package in packages {
-        let Some(table) = package.as_table() else { continue };
-        let Some(name) = table.get("name").and_then(toml::Value::as_str) else { continue };
-        let Some(version) = table.get("version").and_then(toml::Value::as_str) else { continue };
+        let Some(table) = package.as_table() else {
+            continue;
+        };
+        let Some(name) = table.get("name").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let Some(version) = table.get("version").and_then(toml::Value::as_str) else {
+            continue;
+        };
         coordinates.push(format!("{name}@{version}"));
     }
     coordinates.sort();
@@ -178,7 +202,10 @@ fn parse_npm_lock(path: &Path) -> Result<Vec<String>> {
                 coordinates.push(format!("{package_path}@{version}"));
             }
         }
-    } else if let Some(dependencies) = value.get("dependencies").and_then(serde_json::Value::as_object) {
+    } else if let Some(dependencies) = value
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object)
+    {
         collect_npm_v1_dependencies("", dependencies, &mut coordinates);
     } else {
         bail!("npm lockfile has neither packages nor dependencies");
@@ -198,10 +225,16 @@ fn collect_npm_v1_dependencies(
         } else {
             format!("{prefix}/{name}")
         };
-        if let Some(version) = dependency.get("version").and_then(serde_json::Value::as_str) {
+        if let Some(version) = dependency
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+        {
             out.push(format!("{qualified}@{version}"));
         }
-        if let Some(children) = dependency.get("dependencies").and_then(serde_json::Value::as_object) {
+        if let Some(children) = dependency
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+        {
             collect_npm_v1_dependencies(&qualified, children, out);
         }
     }
@@ -218,9 +251,15 @@ fn parse_toml_package_array(path: &Path) -> Result<Vec<String>> {
         .ok_or_else(|| anyhow::anyhow!("lockfile has no package array"))?;
     let mut coordinates = Vec::new();
     for package in packages {
-        let Some(table) = package.as_table() else { continue };
-        let Some(name) = table.get("name").and_then(toml::Value::as_str) else { continue };
-        let Some(version) = table.get("version").and_then(toml::Value::as_str) else { continue };
+        let Some(table) = package.as_table() else {
+            continue;
+        };
+        let Some(name) = table.get("name").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let Some(version) = table.get("version").and_then(toml::Value::as_str) else {
+            continue;
+        };
         coordinates.push(format!("{name}@{version}"));
     }
     coordinates.sort();
@@ -284,8 +323,12 @@ fn parse_go_sum(path: &Path) -> Result<Vec<String>> {
     let mut coordinates = Vec::new();
     for line in raw.lines() {
         let mut fields = line.split_whitespace();
-        let Some(module) = fields.next() else { continue };
-        let Some(version) = fields.next() else { continue };
+        let Some(module) = fields.next() else {
+            continue;
+        };
+        let Some(version) = fields.next() else {
+            continue;
+        };
         if fields.next().is_none() {
             continue;
         }
@@ -303,8 +346,12 @@ fn parse_go_vendor_modules(path: &Path) -> Result<Vec<String>> {
     let mut coordinates = Vec::new();
     for line in raw.lines().filter(|line| line.starts_with("# ")) {
         let mut fields = line[2..].split_whitespace();
-        let Some(module) = fields.next() else { continue };
-        let Some(version) = fields.next() else { continue };
+        let Some(module) = fields.next() else {
+            continue;
+        };
+        let Some(version) = fields.next() else {
+            continue;
+        };
         if version.starts_with('v') {
             coordinates.push(format!("{module}@{version}"));
         }
@@ -325,8 +372,12 @@ fn parse_composer_lock(path: &Path) -> Result<Vec<String>> {
             continue;
         };
         for package in packages {
-            let Some(name) = package.get("name").and_then(serde_json::Value::as_str) else { continue };
-            let Some(version) = package.get("version").and_then(serde_json::Value::as_str) else { continue };
+            let Some(name) = package.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(version) = package.get("version").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
             coordinates.push(format!("{name}@{version}"));
         }
     }
@@ -342,7 +393,10 @@ fn parse_gradle_lock(path: &Path) -> Result<Vec<String>> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("empty="))
-        .filter_map(|line| line.split_once('=').map(|(coordinate, _)| coordinate.trim().to_string()))
+        .filter_map(|line| {
+            line.split_once('=')
+                .map(|(coordinate, _)| coordinate.trim().to_string())
+        })
         .filter(|coordinate| coordinate.matches(':').count() >= 2)
         .collect::<Vec<_>>();
     coordinates.sort();
@@ -367,8 +421,12 @@ fn parse_gemfile_lock(path: &Path) -> Result<Vec<String>> {
             continue;
         }
         let entry = line.trim();
-        let Some(open) = entry.rfind(" (") else { continue };
-        let Some(version) = entry.strip_suffix(')').map(|value| &value[open + 2..]) else { continue };
+        let Some(open) = entry.rfind(" (") else {
+            continue;
+        };
+        let Some(version) = entry.strip_suffix(')').map(|value| &value[open + 2..]) else {
+            continue;
+        };
         let name = &entry[..open];
         if !name.is_empty() && !version.is_empty() {
             coordinates.push(format!("{name}@{version}"));
@@ -386,7 +444,12 @@ fn parse_yarn_lock(path: &Path) -> Result<Vec<String>> {
     let mut coordinates = Vec::new();
     for line in raw.lines() {
         if !line.chars().next().is_some_and(char::is_whitespace) && line.trim_end().ends_with(':') {
-            current = Some(line.trim().trim_end_matches(':').trim_matches('"').to_string());
+            current = Some(
+                line.trim()
+                    .trim_end_matches(':')
+                    .trim_matches('"')
+                    .to_string(),
+            );
             continue;
         }
         let trimmed = line.trim();
@@ -436,7 +499,10 @@ fn parse_pnpm_lock(path: &Path) -> Result<Vec<String>> {
         if !trimmed.ends_with(':') {
             continue;
         }
-        let key = trimmed.trim_end_matches(':').trim_matches('"').trim_matches('\'');
+        let key = trimmed
+            .trim_end_matches(':')
+            .trim_matches('"')
+            .trim_matches('\'');
         if key.contains('@') || key.starts_with('/') {
             coordinates.push(key.to_string());
         }
@@ -458,23 +524,29 @@ fn hash_normalized_coordinates(coordinates: &[String]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn git_provenance(root: &Path) -> (Option<String>, Option<bool>) {
-    let commit = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "HEAD"])
-        .output()
+fn git_provenance(
+    root: &Path,
+    context: &crate::engine::budget::ExecutionContext,
+) -> (Option<String>, Option<bool>) {
+    let commit = context
+        .output(
+            Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["rev-parse", "HEAD"]),
+        )
         .ok()
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|value| !value.is_empty());
 
     let dirty = commit.as_ref().and_then(|_| {
-        Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["status", "--porcelain", "--untracked-files=normal"])
-            .output()
+        context
+            .output(Command::new("git").arg("-C").arg(root).args([
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+            ]))
             .ok()
             .filter(|output| output.status.success())
             .map(|output| !output.stdout.is_empty())
@@ -483,12 +555,23 @@ fn git_provenance(root: &Path) -> (Option<String>, Option<bool>) {
     (commit, dirty)
 }
 
-pub(crate) fn sha256_file(path: &Path) -> Result<String> {
+pub fn sha256_file(path: &Path) -> Result<String> {
+    sha256_file_checked(path, &|| Ok(()))
+}
+pub fn sha256_file_with_context(
+    path: &Path,
+    context: &crate::engine::budget::ExecutionContext,
+) -> Result<String> {
+    sha256_file_checked(path, &|| context.check())
+}
+fn sha256_file_checked(path: &Path, check: &impl Fn() -> Result<()>) -> Result<String> {
+    check()?;
     let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
+        check()?;
         let read = reader
             .read(&mut buffer)
             .with_context(|| format!("cannot read {}", path.display()))?;
@@ -500,14 +583,27 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-
+#[cfg(test)]
 pub fn digest_tree(root: &Path) -> Result<String> {
-    let mut entries = collect_entries(root)?;
+    digest_tree_checked(root, &|| Ok(()))
+}
+
+pub fn digest_tree_with_context(
+    root: &Path,
+    context: &crate::engine::budget::ExecutionContext,
+) -> Result<String> {
+    digest_tree_checked(root, &|| context.check())
+}
+fn digest_tree_checked(root: &Path, check: &impl Fn() -> Result<()>) -> Result<String> {
+    check()?;
+    let mut entries = collect_entries(root, check)?;
     entries.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut hasher = Sha256::new();
 
+    check()?;
     for (relative, absolute) in entries {
+        check()?;
         let metadata = fs::symlink_metadata(&absolute)
             .with_context(|| format!("cannot stat {}", absolute.display()))?;
         let relative_bytes = relative.to_string_lossy();
@@ -545,6 +641,7 @@ pub fn digest_tree(root: &Path) -> Result<String> {
             let mut reader = BufReader::new(file);
             let mut buffer = [0_u8; 64 * 1024];
             loop {
+                check()?;
                 let read = reader
                     .read(&mut buffer)
                     .with_context(|| format!("cannot read {}", absolute.display()))?;
@@ -560,15 +657,54 @@ pub fn digest_tree(root: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-pub fn copy_source_tree(
+#[cfg(test)]
+pub fn copy_source_tree(source: &Path, destination: &Path, order: SourceCopyOrder) -> Result<()> {
+    copy_source_tree_checked(source, destination, order, &|| Ok(()))
+}
+
+pub fn copy_source_tree_with_context(
     source: &Path,
     destination: &Path,
     order: SourceCopyOrder,
+    context: &crate::engine::budget::ExecutionContext,
 ) -> Result<()> {
+    copy_source_tree_checked(source, destination, order, &|| context.check())
+}
+pub fn copy_file_with_context(
+    source: &Path,
+    target: &Path,
+    context: &crate::engine::budget::ExecutionContext,
+) -> Result<()> {
+    copy_file_checked(source, target, &|| context.check())
+}
+fn copy_file_checked(source: &Path, target: &Path, check: &impl Fn() -> Result<()>) -> Result<()> {
+    check()?;
+    let mut input = File::open(source)?;
+    let mut output = File::create(target)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check()?;
+        let n = input.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        check()?;
+        std::io::Write::write_all(&mut output, &buffer[..n])?;
+    }
+    Ok(())
+}
+fn copy_source_tree_checked(
+    source: &Path,
+    destination: &Path,
+    order: SourceCopyOrder,
+    check: &impl Fn() -> Result<()>,
+) -> Result<()> {
+    check()?;
     fs::create_dir_all(destination)
         .with_context(|| format!("cannot create {}", destination.display()))?;
 
-    let mut entries = collect_copy_entries(source)?;
+    check()?;
+    let mut entries = collect_copy_entries(source, check)?;
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     if order == SourceCopyOrder::Reverse {
         entries.reverse();
@@ -576,7 +712,9 @@ pub fn copy_source_tree(
 
     let mut directory_permissions = Vec::new();
 
+    check()?;
     for (relative, absolute, kind) in entries {
+        check()?;
         let target = destination.join(&relative);
 
         if kind.is_dir() {
@@ -587,21 +725,16 @@ pub fn copy_source_tree(
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&absolute, &target).with_context(|| {
-                format!(
-                    "cannot copy {} to {}",
-                    absolute.display(),
-                    target.display()
-                )
-            })?;
+            copy_file_checked(&absolute, &target, check)?;
             let permissions = fs::metadata(&absolute)?.permissions();
             fs::set_permissions(&target, permissions)?;
         } else if kind.is_symlink() {
-            copy_symlink(&absolute, &target)?;
+            copy_symlink(&absolute, &target, check)?;
         }
     }
 
     for (directory, permissions) in directory_permissions.into_iter().rev() {
+        check()?;
         fs::set_permissions(&directory, permissions)
             .with_context(|| format!("cannot set permissions on {}", directory.display()))?;
     }
@@ -609,9 +742,13 @@ pub fn copy_source_tree(
     Ok(())
 }
 
-fn collect_copy_entries(source: &Path) -> Result<Vec<(PathBuf, PathBuf, fs::FileType)>> {
+fn collect_copy_entries(
+    source: &Path,
+    check: &impl Fn() -> Result<()>,
+) -> Result<Vec<(PathBuf, PathBuf, fs::FileType)>> {
     let mut entries = Vec::new();
     for entry in WalkDir::new(source).follow_links(false) {
+        check()?;
         let entry = entry.with_context(|| format!("cannot walk {}", source.display()))?;
         if should_skip(&entry, source) {
             continue;
@@ -642,13 +779,17 @@ fn hash_unix_mode(hasher: &mut Sha256, metadata: &fs::Metadata) {
     }
 }
 
-fn collect_entries(root: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+fn collect_entries(
+    root: &Path,
+    check: &impl Fn() -> Result<()>,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
     if !root.is_dir() {
         bail!("source root {} is not a directory", root.display());
     }
 
     let mut entries = Vec::new();
     for entry in WalkDir::new(root).follow_links(false) {
+        check()?;
         let entry = entry.with_context(|| format!("cannot walk {}", root.display()))?;
         if should_skip(&entry, root) {
             continue;
@@ -680,12 +821,15 @@ fn should_skip(entry: &DirEntry, root: &Path) -> bool {
 
     relative.components().any(|component| {
         let value = component.as_os_str();
-        DEFAULT_IGNORES.iter().any(|ignored| value == OsStr::new(ignored))
+        DEFAULT_IGNORES
+            .iter()
+            .any(|ignored| value == OsStr::new(ignored))
     })
 }
 
 #[cfg(unix)]
-fn copy_symlink(source: &Path, target: &Path) -> Result<()> {
+fn copy_symlink(source: &Path, target: &Path, check: &impl Fn() -> Result<()>) -> Result<()> {
+    check()?;
     use std::os::unix::fs::symlink;
 
     if let Some(parent) = target.parent() {
@@ -699,12 +843,14 @@ fn copy_symlink(source: &Path, target: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn copy_symlink(source: &Path, target: &Path) -> Result<()> {
+fn copy_symlink(source: &Path, target: &Path, check: &impl Fn() -> Result<()>) -> Result<()> {
+    check()?;
     // v0.1 is Linux-first. This fallback preserves content when the host is not Unix.
     let resolved = fs::canonicalize(source)
         .with_context(|| format!("cannot resolve symlink {}", source.display()))?;
     if resolved.is_file() {
-        fs::copy(resolved, target)?;
+        copy_file_checked(&resolved, target, check)?;
+        fs::set_permissions(target, fs::metadata(&resolved)?.permissions())?;
         Ok(())
     } else {
         bail!("directory symlink copying is unsupported on this host")
@@ -713,6 +859,52 @@ fn copy_symlink(source: &Path, target: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preparation_cancellation_is_observed_between_file_chunks() {
+        use std::cell::Cell;
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("large"), vec![7u8; 4 * 1024 * 1024]).unwrap();
+        for copy in [false, true] {
+            let context = crate::engine::budget::ExecutionContext::new(
+                &crate::config::ExecutionConfig::default(),
+            )
+            .unwrap();
+            let calls = Cell::new(0);
+            let check = || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 12 {
+                    context.cancel();
+                }
+                context.check()
+            };
+            let result = if copy {
+                super::copy_source_tree_checked(
+                    source.path(),
+                    target.path(),
+                    crate::model::SourceCopyOrder::Sorted,
+                    &check,
+                )
+                .map(|_| String::new())
+            } else {
+                super::digest_tree_checked(source.path(), &check)
+            };
+            assert!(
+                result.is_err(),
+                "preparation ignored cancellation, copy={copy}, checkpoints={}",
+                calls.get()
+            );
+            assert_eq!(context.reason(), Some("cancelled"));
+            if copy {
+                assert!(
+                    std::fs::metadata(target.path().join("large"))
+                        .unwrap()
+                        .len()
+                        < 4 * 1024 * 1024
+                );
+            }
+        }
+    }
     use super::*;
 
     #[test]
@@ -742,8 +934,14 @@ mod tests {
         copy_source_tree(source.path(), sorted.path(), SourceCopyOrder::Sorted).unwrap();
         copy_source_tree(source.path(), reverse.path(), SourceCopyOrder::Reverse).unwrap();
 
-        assert_eq!(fs::read(sorted.path().join("a.txt")).unwrap(), fs::read(reverse.path().join("a.txt")).unwrap());
-        assert_eq!(fs::read(sorted.path().join("b.txt")).unwrap(), fs::read(reverse.path().join("b.txt")).unwrap());
+        assert_eq!(
+            fs::read(sorted.path().join("a.txt")).unwrap(),
+            fs::read(reverse.path().join("a.txt")).unwrap()
+        );
+        assert_eq!(
+            fs::read(sorted.path().join("b.txt")).unwrap(),
+            fs::read(reverse.path().join("b.txt")).unwrap()
+        );
     }
 
     #[test]
@@ -762,13 +960,36 @@ mod tests {
     }
 
     #[test]
+    fn source_provenance_respects_exhausted_execution_context() {
+        let root = tempfile::tempdir().unwrap();
+        let context =
+            crate::engine::budget::ExecutionContext::new(&crate::config::ExecutionConfig {
+                max_dispatches: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            collect_source_provenance(root.path(), &context).is_err(),
+            "exhaustion must stop dependency preparation rather than return an apparently complete snapshot"
+        );
+        assert_eq!(context.reason(), Some("budget_exhausted"));
+    }
+
+    #[test]
     fn source_provenance_hashes_dependency_files() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("Cargo.lock"), "package = demo\n").unwrap();
         fs::write(temp.path().join("source.txt"), "source\n").unwrap();
-        let provenance = collect_source_provenance(temp.path()).unwrap();
+        let provenance = collect_source_provenance(
+            temp.path(),
+            &crate::engine::budget::ExecutionContext::new(&Default::default()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(provenance.dependency_files.len(), 1);
-        assert_eq!(provenance.dependency_files[0].path, PathBuf::from("Cargo.lock"));
+        assert_eq!(
+            provenance.dependency_files[0].path,
+            PathBuf::from("Cargo.lock")
+        );
         assert_eq!(provenance.dependency_files[0].sha256.len(), 64);
     }
 
@@ -794,7 +1015,11 @@ version = "4.5.6"
             "alpha==1.0\nbeta==2.0 # pinned\n--index-url https://private.invalid/simple\n",
         )
         .unwrap();
-        let provenance = collect_source_provenance(temp.path()).unwrap();
+        let provenance = collect_source_provenance(
+            temp.path(),
+            &crate::engine::budget::ExecutionContext::new(&Default::default()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(provenance.dependency_resolutions.len(), 2);
         let cargo = provenance
             .dependency_resolutions
@@ -861,18 +1086,31 @@ version = "4.5.6"
         )
         .unwrap();
 
-        let provenance = collect_source_provenance(temp.path()).unwrap();
+        let provenance = collect_source_provenance(
+            temp.path(),
+            &crate::engine::budget::ExecutionContext::new(&Default::default()).unwrap(),
+        )
+        .unwrap();
         let ecosystems = provenance
             .dependency_resolutions
             .iter()
             .filter(|record| record.parsed)
             .map(|record| record.ecosystem.as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        for expected in ["poetry", "uv", "pipenv", "go", "composer", "gradle", "bundler", "yarn", "pnpm"] {
-            assert!(ecosystems.contains(expected), "missing {expected}: {ecosystems:?}");
+        for expected in [
+            "poetry", "uv", "pipenv", "go", "composer", "gradle", "bundler", "yarn", "pnpm",
+        ] {
+            assert!(
+                ecosystems.contains(expected),
+                "missing {expected}: {ecosystems:?}"
+            );
         }
         assert!(provenance.dependency_resolutions.iter().all(|record| {
-            !record.parsed || record.normalized_sha256.as_deref().is_some_and(|hash| hash.len() == 64)
+            !record.parsed
+                || record
+                    .normalized_sha256
+                    .as_deref()
+                    .is_some_and(|hash| hash.len() == 64)
         }));
     }
 
@@ -886,8 +1124,11 @@ version = "4.5.6"
         fs::write(outside.path(), "outside secret-like bytes\n").unwrap();
         symlink(outside.path(), project.path().join("requirements.txt")).unwrap();
 
-        let provenance = collect_source_provenance(project.path()).unwrap();
+        let provenance = collect_source_provenance(
+            project.path(),
+            &crate::engine::budget::ExecutionContext::new(&Default::default()).unwrap(),
+        )
+        .unwrap();
         assert!(provenance.dependency_files.is_empty());
     }
-
 }

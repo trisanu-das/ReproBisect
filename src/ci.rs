@@ -230,6 +230,7 @@ pub fn from_report(
     let binary =
         std::fs::read(std::env::current_exe()?).context("cannot identify running binary")?;
     let mut effective_config = config.clone();
+    effective_config.execution.resources = config.execution.resources.effective();
     effective_config.experiments.control_runs = options.control_runs;
     effective_config.experiments.intervention_runs = options.intervention_runs;
     effective_config.experiments.confirmation_runs = options.confirmation_runs;
@@ -238,9 +239,19 @@ pub fn from_report(
     effective_config.experiments.interaction_runs = options.interaction_runs;
     effective_config.experiments.max_interaction_variables = options.max_interaction_variables;
     let effective = serde_json::to_vec(&effective_config)?;
-    let coverage = coverage(report, config, options);
-    let policy = evaluate_policy(&report.status, coverage.complete, policy);
-    let reason = if coverage.complete {
+    let mut coverage = coverage(report, config, options);
+    let interrupted = crate::engine::budget::completion_reason(&report.notes);
+    if interrupted.is_some() {
+        coverage.complete = false;
+    }
+    let mut policy = evaluate_policy(&report.status, coverage.complete, policy);
+    if interrupted.is_some() {
+        policy.passed = false;
+        policy.exit_code = 5;
+    }
+    let reason = if interrupted.is_some() {
+        "operational_error"
+    } else if coverage.complete {
         "completed"
     } else {
         "incomplete_coverage"
@@ -257,7 +268,7 @@ pub fn from_report(
             binary_version: env!("CARGO_PKG_VERSION"),
             binary_sha256: Some(hex::encode(Sha256::digest(binary))),
             effective_config_sha256: Some(hex::encode(Sha256::digest(effective))),
-            source_sha256: Some(report.source_digest.clone()),
+            source_sha256: (!report.source_digest.is_empty()).then(|| report.source_digest.clone()),
             experiment_id: Some(report.experiment_id),
         },
         report: Some(ReportReference {
@@ -372,6 +383,34 @@ mod tests {
     use super::*;
     use crate::model::CheckStatus;
     use sha2::Digest;
+
+    #[test]
+    fn ci_interruption_keeps_frozen_v1_completion_enum() {
+        let (mut report, config, options) = sample();
+        report.status = CheckStatus::Inconclusive;
+        report.notes.push("execution_completion=cancelled".into());
+        let project = tempfile::tempdir().unwrap();
+        crate::evidence::persist_report(project.path(), &report).unwrap();
+        let envelope = from_report(
+            project.path(),
+            &report,
+            &config,
+            &options,
+            CiPolicy::ReportOnly,
+        )
+        .unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../schemas/automation-v1.schema.json")).unwrap();
+        let reasons = schema["properties"]["completion"]["properties"]["reason"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(
+            reasons.iter().any(|r| r == envelope.completion.reason),
+            "interruptions must not widen frozen schema v1"
+        );
+        assert_eq!(envelope.policy.exit_code, 5);
+        assert!(!envelope.completion.completed);
+    }
 
     fn sample() -> (
         crate::model::CheckReport,
@@ -575,6 +614,53 @@ hostname = false
         report.interventions[0].reference_runs =
             vec![report.runs[0].clone(); options.stochastic_runs];
         assert!(coverage(&report, &config, &options).complete);
+    }
+
+    #[test]
+    fn ci_effective_restricted_resource_defaults_have_same_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let (report, mut config, options) = sample();
+        crate::evidence::persist_report(temp.path(), &report).unwrap();
+        config.execution.resources.restricted = true;
+        let omitted = from_report(
+            temp.path(),
+            &report,
+            &config,
+            &options,
+            CiPolicy::ReportOnly,
+        )
+        .unwrap();
+        let context = crate::engine::budget::ExecutionContext::new(&config.execution).unwrap();
+        config.execution.resources = config.execution.resources.effective();
+        assert_eq!(
+            serde_json::to_value(&*context.resources).unwrap(),
+            serde_json::to_value(&config.execution.resources).unwrap()
+        );
+        let explicit = from_report(
+            temp.path(),
+            &report,
+            &config,
+            &options,
+            CiPolicy::ReportOnly,
+        )
+        .unwrap();
+        assert_eq!(
+            omitted.identities.effective_config_sha256,
+            explicit.identities.effective_config_sha256
+        );
+        config.execution.resources.cpus = Some(3);
+        let different = from_report(
+            temp.path(),
+            &report,
+            &config,
+            &options,
+            CiPolicy::ReportOnly,
+        )
+        .unwrap();
+        assert_ne!(
+            explicit.identities.effective_config_sha256,
+            different.identities.effective_config_sha256
+        );
     }
 
     #[test]

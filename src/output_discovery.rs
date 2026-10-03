@@ -1,25 +1,19 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
-use uuid::Uuid;
+
 use walkdir::{DirEntry, WalkDir};
 
 use crate::{
     artifact::detect_type,
     model::{ArtifactType, RunnerBackend, SourceCopyOrder},
-    source::copy_source_tree,
+    source::copy_source_tree_with_context,
 };
 
 const MAX_SCAN_FILES: usize = 100_000;
@@ -79,6 +73,65 @@ pub fn discover_outputs(
     command: &[String],
     runner: RunnerBackend,
 ) -> Result<OutputDiscoveryResult> {
+    let context =
+        crate::engine::budget::ExecutionContext::new(&crate::config::ExecutionConfig::default())?;
+    let result = discover_with_context(project, image, command, runner, &context);
+    // Only an actually executed, closed-stream build-command failure is advisory.
+    // Infrastructure errors that finish classifies later must still fail closed.
+    let advisory = context.reason().is_none()
+        && result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<DiscoveryBuildFailed>());
+    let result = context.finish(project, result);
+    // A receipt write error may replace even an ordinary executed build failure.
+    // Only the original typed failure, not arbitrary finish errors, is advisory.
+    if advisory
+        && result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<DiscoveryBuildFailed>())
+    {
+        result
+    } else {
+        result.map_err(|error| anyhow::Error::new(DiscoveryInterrupted(error)))
+    }
+}
+#[derive(Debug)]
+pub struct DiscoveryInterrupted(anyhow::Error);
+impl std::fmt::Display for DiscoveryInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "output discovery interrupted: {:#}", self.0)
+    }
+}
+impl std::error::Error for DiscoveryInterrupted {}
+
+/// An unsuccessful executed command is not an infrastructure interruption.
+/// Constructed only after wait, cleanup and both captures have completed.
+#[derive(Debug)]
+struct DiscoveryBuildFailed {
+    status: std::process::ExitStatus,
+    tails: String,
+}
+impl std::fmt::Display for DiscoveryBuildFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "temporary discovery build failed with status {}{}",
+            self.status, self.tails
+        )
+    }
+}
+impl std::error::Error for DiscoveryBuildFailed {}
+
+fn discover_with_context(
+    project: &Path,
+    image: &str,
+    command: &[String],
+    runner: RunnerBackend,
+    context: &crate::engine::budget::ExecutionContext,
+) -> Result<OutputDiscoveryResult> {
+    context.check()?;
     if command.is_empty() {
         bail!("cannot probe outputs with an empty build command");
     }
@@ -87,12 +140,12 @@ pub fn discover_outputs(
         .prefix("reprobisect-output-discovery-")
         .tempdir()
         .context("cannot create temporary output-discovery workspace")?;
-    copy_source_tree(project, workspace.path(), SourceCopyOrder::Sorted)
+    copy_source_tree_with_context(project, workspace.path(), SourceCopyOrder::Sorted, context)
         .context("cannot prepare temporary output-discovery workspace")?;
 
-    let before = snapshot(workspace.path())?;
-    run_build(workspace.path(), image, command, runner)?;
-    let after = snapshot(workspace.path())?;
+    let before = snapshot_checked(workspace.path(), &|| context.check())?;
+    run_build(project, workspace.path(), image, command, runner, context)?;
+    let after = snapshot_checked(workspace.path(), &|| context.check())?;
 
     let (mut candidates, changed_file_count) =
         candidates_from_snapshots(workspace.path(), &before, &after)?;
@@ -104,6 +157,7 @@ pub fn discover_outputs(
     });
     candidates.truncate(MAX_CANDIDATES);
 
+    context.check()?;
     Ok(OutputDiscoveryResult {
         candidates,
         changed_file_count,
@@ -112,19 +166,26 @@ pub fn discover_outputs(
 }
 
 fn run_build(
+    project: &Path,
     workspace: &Path,
     image: &str,
     build_command: &[String],
     runner: RunnerBackend,
+    context: &crate::engine::budget::ExecutionContext,
 ) -> Result<()> {
+    context.dispatch_build()?;
     let runtime = runner.executable();
-    let container_name = format!("reprobisect-output-discovery-{}", Uuid::new_v4().simple());
+    let mut owned = crate::engine::budget::OwnedContainer::new(context, runner, "discovery")?;
+    let container_name = owned.name();
     let mut command = Command::new(runtime);
     command
         .arg("run")
-        .arg("--rm")
+        .arg("--cidfile")
+        .arg(owned.cidfile())
         .arg("--name")
-        .arg(&container_name)
+        .arg(container_name)
+        .arg("--label")
+        .arg(context.operation_label())
         .arg("--volume")
         .arg(format!("{}:/workspace", workspace.display()))
         .arg("--workdir")
@@ -156,12 +217,14 @@ fn run_build(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    context.check()?;
     let mut child = command.spawn().with_context(|| {
         format!(
             "cannot execute {} for output discovery; run reprobisect doctor to check runtime readiness",
             runner.display_name()
         )
     })?;
+    owned.launched();
     let stdout = child
         .stdout
         .take()
@@ -170,60 +233,43 @@ fn run_build(
         .stderr
         .take()
         .context("output-discovery stderr pipe was not available")?;
-    let stdout_thread = thread::spawn(move || drain_tail(stdout));
-    let stderr_thread = thread::spawn(move || drain_tail(stderr));
-
-    let finished = Arc::new(AtomicBool::new(false));
-    let watchdog_finished = Arc::clone(&finished);
-    let watchdog_name = container_name.clone();
-    let watchdog_runtime = runtime.to_string();
-    let watchdog = thread::spawn(move || {
-        let started = Instant::now();
-        let timeout = Duration::from_secs(BUILD_TIMEOUT_SECONDS);
-        while started.elapsed() < timeout {
-            if watchdog_finished.load(Ordering::Relaxed) {
-                return false;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-
-        if !watchdog_finished.swap(true, Ordering::Relaxed) {
-            let _ = Command::new(&watchdog_runtime)
-                .arg("kill")
-                .arg(&watchdog_name)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            true
-        } else {
-            false
-        }
-    });
-
-    let status_result = child.wait();
-    finished.store(true, Ordering::Relaxed);
-    let timed_out = watchdog
-        .join()
-        .map_err(|_| anyhow::anyhow!("output-discovery timeout watchdog panicked"))?;
-    let stdout = join_capture(stdout_thread, "stdout")?;
-    let stderr = join_capture(stderr_thread, "stderr")?;
-    let status =
-        status_result.context("cannot wait for temporary output-discovery build")?;
-
-    if timed_out {
-        bail!(
-            "temporary discovery build exceeded timeout of {} seconds{}",
-            BUILD_TIMEOUT_SECONDS,
-            failure_tails(&stdout, &stderr)
-        );
+    let stdout_live =
+        crate::engine::budget::LiveCapture::start(stdout, FAILURE_OUTPUT_BYTES as u64);
+    let stderr_live =
+        crate::engine::budget::LiveCapture::start(stderr, FAILURE_OUTPUT_BYTES as u64);
+    let status_result = context.wait_child(&mut child, Duration::from_secs(BUILD_TIMEOUT_SECONDS));
+    let cleanup_result = owned.cleanup();
+    let stdout = stdout_live.snapshot();
+    let stderr = stderr_live.snapshot();
+    let completion = context.check();
+    if status_result.is_err()
+        || cleanup_result.is_err()
+        || completion.is_err()
+        || !stdout.complete
+        || !stderr.complete
+    {
+        context.stop("operational_error");
+        context.persist_partial_attempt(project, serde_json::json!({
+            "purpose": "discovery", "stdout": stdout, "stderr": stderr,
+            "exit_status": status_result.as_ref().ok().and_then(|s| s.code()),
+            "cleanup_verified": cleanup_result.is_ok(),
+            "artifacts": crate::engine::budget::interrupted_artifacts(workspace, &[PathBuf::from(".")]),
+            "qualification": "interrupted_discovery_not_completed_output_inference",
+        }))?;
+        status_result?;
+        cleanup_result?;
+        completion?;
+        bail!("discovery output pipes did not close completely");
     }
+    let status = status_result?;
+    let stdout = stdout.text;
+    let stderr = stderr.text;
 
     if !status.success() {
-        bail!(
-            "temporary discovery build failed with status {}{}",
+        return Err(anyhow::Error::new(DiscoveryBuildFailed {
             status,
-            failure_tails(&stdout, &stderr)
-        );
+            tails: failure_tails(&stdout, &stderr),
+        }));
     }
 
     Ok(())
@@ -242,50 +288,12 @@ fn failure_tails(stdout: &str, stderr: &str) -> String {
     message
 }
 
-fn drain_tail<R: Read>(mut reader: R) -> std::io::Result<String> {
-    let mut retained = Vec::with_capacity(FAILURE_OUTPUT_BYTES);
-    let mut buffer = [0_u8; 16 * 1024];
-
-    loop {
-        let read = match reader.read(&mut buffer) {
-            Ok(read) => read,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        if read == 0 {
-            break;
-        }
-
-        if read >= FAILURE_OUTPUT_BYTES {
-            retained.clear();
-            retained.extend_from_slice(&buffer[read - FAILURE_OUTPUT_BYTES..read]);
-            continue;
-        }
-
-        let overflow = retained
-            .len()
-            .saturating_add(read)
-            .saturating_sub(FAILURE_OUTPUT_BYTES);
-        if overflow > 0 {
-            retained.drain(..overflow);
-        }
-        retained.extend_from_slice(&buffer[..read]);
-    }
-
-    Ok(String::from_utf8_lossy(&retained).trim().to_string())
-}
-
-fn join_capture(
-    handle: thread::JoinHandle<std::io::Result<String>>,
-    stream: &str,
-) -> Result<String> {
-    let captured = handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("{stream} capture thread panicked"))?;
-    captured.with_context(|| format!("cannot read output-discovery {stream}"))
-}
-
+#[cfg(test)]
 fn snapshot(root: &Path) -> Result<Snapshot> {
+    snapshot_checked(root, &|| Ok(()))
+}
+fn snapshot_checked(root: &Path, check: &impl Fn() -> Result<()>) -> Result<Snapshot> {
+    check()?;
     let mut files = BTreeMap::new();
     let mut truncated = false;
 
@@ -296,6 +304,7 @@ fn snapshot(root: &Path) -> Result<Snapshot> {
         .filter_entry(should_descend);
 
     for entry in walker {
+        check()?;
         let entry = entry.with_context(|| format!("cannot scan {}", root.display()))?;
         if !entry.file_type().is_file() {
             continue;
@@ -474,7 +483,10 @@ fn generic_kind(relative: &Path, stamp: &FileStamp) -> Option<(String, i32)> {
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    if matches!(extension.as_str(), "rpm" | "apk" | "gem" | "nupkg" | "crate") {
+    if matches!(
+        extension.as_str(),
+        "rpm" | "apk" | "gem" | "nupkg" | "crate"
+    ) {
         return Some(("package archive".to_string(), 88));
     }
     if matches!(extension.as_str(), "so" | "dylib" | "dll") || lower.contains(".so.") {
@@ -498,8 +510,7 @@ fn generic_kind(relative: &Path, stamp: &FileStamp) -> Option<(String, i32)> {
 fn source_like_extension(extension: &str) -> bool {
     matches!(
         extension,
-        "c"
-            | "cc"
+        "c" | "cc"
             | "cpp"
             | "cxx"
             | "h"
@@ -532,8 +543,17 @@ fn obvious_intermediate_extension(path: &Path) -> bool {
         .to_ascii_lowercase();
     matches!(
         extension.as_str(),
-        "o" | "obj" | "d" | "dep" | "rmeta" | "class" | "pyc" | "pyo" | "tmp" | "temp"
-            | "log" | "stamp"
+        "o" | "obj"
+            | "d"
+            | "dep"
+            | "rmeta"
+            | "class"
+            | "pyc"
+            | "pyo"
+            | "tmp"
+            | "temp"
+            | "log"
+            | "stamp"
     )
 }
 
@@ -565,13 +585,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn log_tail_capture_is_bounded() {
+    fn discovery_entry_cannot_bypass_operation_deadline() {
+        let project = tempfile::tempdir().unwrap();
+        let context =
+            crate::engine::budget::ExecutionContext::new(&crate::config::ExecutionConfig {
+                total_timeout_seconds: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            run_build(
+                project.path(),
+                project.path(),
+                "unused",
+                &["true".into()],
+                RunnerBackend::Docker,
+                &context
+            )
+            .is_err()
+        );
+        assert_eq!(context.reason(), Some("deadline_exhausted"));
+    }
+
+    #[test]
+    fn live_discovery_capture_is_bounded() {
         let mut bytes = vec![b'A'; FAILURE_OUTPUT_BYTES + 1024];
         bytes.extend_from_slice(b"FINAL");
-        let captured = drain_tail(std::io::Cursor::new(bytes)).unwrap();
-
-        assert!(captured.len() <= FAILURE_OUTPUT_BYTES);
-        assert!(captured.ends_with("FINAL"));
+        let captured = crate::engine::budget::LiveCapture::start(
+            std::io::Cursor::new(bytes),
+            FAILURE_OUTPUT_BYTES as u64,
+        )
+        .snapshot();
+        assert!(captured.text.len() <= FAILURE_OUTPUT_BYTES);
+        assert!(captured.complete);
+        assert!(captured.retained_truncated);
+        assert_eq!(
+            captured.observed_bytes,
+            (FAILURE_OUTPUT_BYTES + 1029) as u64
+        );
     }
 
     #[test]
@@ -581,7 +632,11 @@ mod tests {
         let before = snapshot(dir.path()).unwrap();
 
         fs::write(dir.path().join("target/release/app"), b"\x7fELFdemo").unwrap();
-        fs::write(dir.path().join("target/release/deps/app.o"), b"\x7fELFobject").unwrap();
+        fs::write(
+            dir.path().join("target/release/deps/app.o"),
+            b"\x7fELFobject",
+        )
+        .unwrap();
 
         #[cfg(unix)]
         {
@@ -611,8 +666,7 @@ mod tests {
         fs::write(dir.path().join("dist/demo.whl"), b"PK\x03\x04demo").unwrap();
         let after = snapshot(dir.path()).unwrap();
 
-        let (candidates, changed) =
-            candidates_from_snapshots(dir.path(), &before, &after).unwrap();
+        let (candidates, changed) = candidates_from_snapshots(dir.path(), &before, &after).unwrap();
 
         assert_eq!(changed, 1);
         assert_eq!(candidates.len(), 1);

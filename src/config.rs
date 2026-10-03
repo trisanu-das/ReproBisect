@@ -13,7 +13,67 @@ use crate::model::RunnerBackend;
 pub struct Config {
     pub build: BuildConfig,
     #[serde(default)]
+    pub execution: ExecutionConfig,
+    #[serde(default)]
     pub experiments: ExperimentsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionConfig {
+    pub max_dispatches: u64,
+    pub total_timeout_seconds: u64,
+    pub resources: ResourcePolicy,
+}
+impl ExecutionConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_dispatches > 1_000_000 || self.total_timeout_seconds > 7 * 24 * 3600 {
+            bail!("execution allowance exceeds supported bounds (1000000 dispatches / 7 days)");
+        }
+        let p = &self.resources;
+        if p.cpus == Some(0) || p.pids == Some(0) || p.memory_bytes == Some(0) {
+            bail!("resource limits must be positive");
+        }
+        if p.network
+            .as_deref()
+            .is_some_and(|n| !matches!(n, "none" | "default"))
+        {
+            bail!("resource network must be none or default; host networking is not permitted");
+        }
+        Ok(())
+    }
+}
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            max_dispatches: 4096,
+            total_timeout_seconds: 3600,
+            resources: ResourcePolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourcePolicy {
+    pub restricted: bool,
+    pub cpus: Option<u32>,
+    pub memory_bytes: Option<u64>,
+    pub pids: Option<u32>,
+    pub network: Option<String>,
+}
+
+impl ResourcePolicy {
+    pub fn effective(&self) -> Self {
+        let mut policy = self.clone();
+        if policy.restricted {
+            policy.cpus.get_or_insert(2);
+            policy.memory_bytes.get_or_insert(1_073_741_824);
+            policy.pids.get_or_insert(256);
+            policy.network.get_or_insert_with(|| "none".into());
+        }
+        policy
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,8 +243,12 @@ impl Default for ExperimentDimensionsConfig {
 impl Config {
     pub fn load(project_root: &Path) -> Result<Self> {
         let path = project_root.join(".reprobisect.toml");
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("cannot read {}; run `reprobisect init` first", path.display()))?;
+        let raw = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "cannot read {}; run `reprobisect init` first",
+                path.display()
+            )
+        })?;
         let config: Config = toml::from_str(&raw)
             .with_context(|| format!("invalid configuration in {}", path.display()))?;
         config.validate(project_root)?;
@@ -192,6 +256,26 @@ impl Config {
     }
 
     fn validate(&self, project_root: &Path) -> Result<()> {
+        self.execution.validate()?;
+        if self.execution.resources.effective().network.is_some()
+            && self.experiments.dimensions.network_access
+        {
+            bail!(
+                "fixed network resource policy conflicts with the network_access tested dimension"
+            );
+        }
+        if self.execution.resources.restricted
+            && (self.experiments.network_trace || self.experiments.file_input_trace)
+        {
+            bail!(
+                "restricted resource profile refuses tracing: parsed trace limits do not cap temporary trace disk"
+            );
+        }
+        if self.execution.resources.effective().cpus.is_some()
+            && self.experiments.dimensions.cpu_count
+        {
+            bail!("fixed CPU resource policy conflicts with the cpu_count tested dimension");
+        }
         if self.build.image.trim().is_empty() {
             bail!("build.image cannot be empty");
         }
@@ -216,9 +300,7 @@ impl Config {
         if self.experiments.stochastic_runs > 1024 {
             bail!("experiments.stochastic_runs must not exceed 1024");
         }
-        if !(0.0 < self.experiments.stochastic_alpha
-            && self.experiments.stochastic_alpha < 1.0)
-        {
+        if !(0.0 < self.experiments.stochastic_alpha && self.experiments.stochastic_alpha < 1.0) {
             bail!("experiments.stochastic_alpha must be strictly between 0 and 1");
         }
         if !(2..=32).contains(&self.experiments.interaction_runs) {
@@ -262,18 +344,29 @@ impl Config {
         }
 
         for (key, values) in &self.experiments.toolchain_variables {
-            if !matches!(key.as_str(), "CC" | "CXX" | "LD" | "AR" | "RANLIB" | "RUSTC") {
-                bail!("experiments.toolchain_variables contains unsupported binding {key:?}; supported keys: CC, CXX, LD, AR, RANLIB, RUSTC");
+            if !matches!(
+                key.as_str(),
+                "CC" | "CXX" | "LD" | "AR" | "RANLIB" | "RUSTC"
+            ) {
+                bail!(
+                    "experiments.toolchain_variables contains unsupported binding {key:?}; supported keys: CC, CXX, LD, AR, RANLIB, RUSTC"
+                );
             }
             if values.len() != 2 {
-                bail!("experiments.toolchain_variables.{key} must contain exactly two executable values: [baseline, variant]");
+                bail!(
+                    "experiments.toolchain_variables.{key} must contain exactly two executable values: [baseline, variant]"
+                );
             }
             if values[0] == values[1] {
-                bail!("experiments.toolchain_variables.{key} baseline and variant executables must differ");
+                bail!(
+                    "experiments.toolchain_variables.{key} baseline and variant executables must differ"
+                );
             }
             for value in values {
                 if !valid_toolchain_executable(value) {
-                    bail!("experiments.toolchain_variables.{key} contains unsafe executable value {value:?}; use a single executable path/name with optional {{source}}/{{build}} placeholders");
+                    bail!(
+                        "experiments.toolchain_variables.{key} contains unsafe executable value {value:?}; use a single executable path/name with optional {{source}}/{{build}} placeholders"
+                    );
                 }
             }
         }
@@ -288,18 +381,34 @@ impl Config {
                 bail!("experiments.dependency_variants id cannot be empty");
             }
             if !dependency_ids.insert(variant.id.as_str()) {
-                bail!("experiments.dependency_variants contains duplicate id {:?}", variant.id);
+                bail!(
+                    "experiments.dependency_variants contains duplicate id {:?}",
+                    variant.id
+                );
             }
             validate_relative_path("experiments.dependency_variants.target", &variant.target)?;
-            validate_relative_path("experiments.dependency_variants.variant_file", &variant.variant_file)?;
+            validate_relative_path(
+                "experiments.dependency_variants.variant_file",
+                &variant.variant_file,
+            )?;
             if variant.target == variant.variant_file {
-                bail!("dependency variant {:?} target and variant_file must differ", variant.id);
+                bail!(
+                    "dependency variant {:?} target and variant_file must differ",
+                    variant.id
+                );
             }
             if !dependency_targets.insert(variant.target.clone()) {
-                bail!("multiple dependency variants target {}; use one controlled replacement per target", variant.target.display());
+                bail!(
+                    "multiple dependency variants target {}; use one controlled replacement per target",
+                    variant.target.display()
+                );
             }
             validate_regular_project_file(project_root, "dependency target", &variant.target)?;
-            validate_regular_project_file(project_root, "dependency variant_file", &variant.variant_file)?;
+            validate_regular_project_file(
+                project_root,
+                "dependency variant_file",
+                &variant.variant_file,
+            )?;
         }
 
         if self.experiments.dependency_cache_paths.len() > 16 {
@@ -311,7 +420,9 @@ impl Config {
                     .chars()
                     .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
             {
-                bail!("experiments.dependency_cache_paths contains invalid ecosystem label {ecosystem:?}");
+                bail!(
+                    "experiments.dependency_cache_paths contains invalid ecosystem label {ecosystem:?}"
+                );
             }
             if !path.starts_with('/')
                 || path.chars().any(char::is_whitespace)
@@ -319,7 +430,9 @@ impl Config {
                 || path.contains('\n')
                 || path.split('/').any(|component| component == "..")
             {
-                bail!("experiments.dependency_cache_paths.{ecosystem} must be a simple absolute in-container path without whitespace or '..'");
+                bail!(
+                    "experiments.dependency_cache_paths.{ecosystem} must be a simple absolute in-container path without whitespace or '..'"
+                );
             }
         }
 
@@ -342,7 +455,9 @@ impl Config {
 
         for key in self.experiments.toolchain_variables.keys() {
             if self.experiments.environment_variables.contains_key(key) {
-                bail!("experiments.toolchain_variables.{key} conflicts with experiments.environment_variables.{key}; control the binding through only one experiment dimension");
+                bail!(
+                    "experiments.toolchain_variables.{key} conflicts with experiments.environment_variables.{key}; control the binding through only one experiment dimension"
+                );
             }
         }
 
@@ -354,13 +469,19 @@ impl Config {
                 key.as_str(),
                 "SOURCE_DATE_EPOCH" | "TZ" | "LANG" | "LC_ALL" | "REPROBISECT_CPU_COUNT"
             ) {
-                bail!("experiments.environment_variables.{key} conflicts with a built-in intervention dimension");
+                bail!(
+                    "experiments.environment_variables.{key} conflicts with a built-in intervention dimension"
+                );
             }
             if values.len() != 2 {
-                bail!("experiments.environment_variables.{key} must contain exactly two values: [baseline, variant]");
+                bail!(
+                    "experiments.environment_variables.{key} must contain exactly two values: [baseline, variant]"
+                );
             }
             if values[0] == values[1] {
-                bail!("experiments.environment_variables.{key} baseline and variant values must differ");
+                bail!(
+                    "experiments.environment_variables.{key} baseline and variant values must differ"
+                );
             }
         }
 
@@ -379,7 +500,10 @@ fn validate_relative_path(field: &str, path: &Path) -> Result<()> {
         .components()
         .any(|part| matches!(part, std::path::Component::ParentDir))
     {
-        bail!("{field} may not escape the project root: {}", path.display());
+        bail!(
+            "{field} may not escape the project root: {}",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -398,7 +522,10 @@ fn validate_regular_project_file(project_root: &Path, label: &str, relative: &Pa
     let metadata = fs::symlink_metadata(&absolute)
         .with_context(|| format!("cannot stat {label} {}", absolute.display()))?;
     if !metadata.file_type().is_file() {
-        bail!("{label} {} must be a regular file (symlinks are not followed)", relative.display());
+        bail!(
+            "{label} {} must be a regular file (symlinks are not followed)",
+            relative.display()
+        );
     }
     Ok(())
 }
@@ -407,45 +534,154 @@ fn valid_toolchain_executable(value: &str) -> bool {
     if value.is_empty() || value.chars().any(char::is_whitespace) {
         return false;
     }
-    let expanded = value.replace("{source}", "/src").replace("{build}", "/workspace");
+    let expanded = value
+        .replace("{source}", "/src")
+        .replace("{build}", "/workspace");
     if expanded.contains('{') || expanded.contains('}') {
         return false;
     }
-    expanded.chars().all(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+' | '.' | '/' | ':')
-    })
+    expanded
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+' | '.' | '/' | ':'))
 }
 
-fn default_working_directory() -> PathBuf { PathBuf::from(".") }
-fn default_timeout_seconds() -> u64 { 600 }
-fn default_log_capture_max_bytes() -> u64 { 1024 * 1024 }
-fn default_dependency_cache_max_files() -> usize { 2048 }
-fn default_dependency_cache_max_bytes() -> u64 { 128 * 1024 * 1024 }
-fn default_syscall_trace_max_bytes() -> u64 { 32 * 1024 * 1024 }
+fn default_working_directory() -> PathBuf {
+    PathBuf::from(".")
+}
+fn default_timeout_seconds() -> u64 {
+    600
+}
+fn default_log_capture_max_bytes() -> u64 {
+    1024 * 1024
+}
+fn default_dependency_cache_max_files() -> usize {
+    2048
+}
+fn default_dependency_cache_max_bytes() -> u64 {
+    128 * 1024 * 1024
+}
+fn default_syscall_trace_max_bytes() -> u64 {
+    32 * 1024 * 1024
+}
 
-fn default_control_runs() -> usize { 2 }
-fn default_intervention_runs() -> usize { 1 }
-fn default_confirmation_runs() -> usize { 1 }
-fn default_stochastic_runs() -> usize { 4 }
-fn default_stochastic_alpha() -> f64 { 0.05 }
-fn default_interaction_runs() -> usize { 2 }
-fn default_comparison_runs() -> usize { 2 }
-fn default_comparison_subset_runs() -> usize { 2 }
-fn default_max_interaction_variables() -> usize { 8 }
-fn default_true() -> bool { true }
+fn default_control_runs() -> usize {
+    2
+}
+fn default_intervention_runs() -> usize {
+    1
+}
+fn default_confirmation_runs() -> usize {
+    1
+}
+fn default_stochastic_runs() -> usize {
+    4
+}
+fn default_stochastic_alpha() -> f64 {
+    0.05
+}
+fn default_interaction_runs() -> usize {
+    2
+}
+fn default_comparison_runs() -> usize {
+    2
+}
+fn default_comparison_subset_runs() -> usize {
+    2
+}
+fn default_max_interaction_variables() -> usize {
+    8
+}
+fn default_true() -> bool {
+    true
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn invalid_execution_bounds_and_network_conflicts_fail_closed() {
+        let project = tempfile::tempdir().unwrap();
+        for settings in [
+            "[execution.resources]\ncpus = 0",
+            "[execution.resources]\npids = 0",
+            "[execution.resources]\nmemory_bytes = 0",
+            "[execution]\ntotal_timeout_seconds = 18446744073709551615",
+            "[execution.resources]\nnetwork = 'host'",
+            "[execution.resources]\nnetwork = 'none'\n[experiments.dimensions]\nnetwork_access = true",
+        ] {
+            fs::write(
+                project.path().join(".reprobisect.toml"),
+                format!("[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\n{settings}\n"),
+            )
+            .unwrap();
+            assert!(
+                Config::load(project.path()).is_err(),
+                "must reject {settings}"
+            );
+        }
+    }
+
+    #[test]
+    fn restricted_profile_refuses_unbounded_trace_disk() {
+        let project = tempfile::tempdir().unwrap();
+        for tracing in ["network_trace", "file_input_trace"] {
+            fs::write(
+                project.path().join(".reprobisect.toml"),
+                format!(
+                    r#"
+[build]
+image = "unused"
+command = ["true"]
+outputs = ["out"]
+[execution.resources]
+restricted = true
+[experiments]
+{tracing} = true
+"#
+                ),
+            )
+            .unwrap();
+            assert!(
+                Config::load(project.path()).is_err(),
+                "restricted tracing needs a real storage cap"
+            );
+        }
+    }
+
+    #[test]
+    fn resource_policy_conflict_is_rejected() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(
+            project.path().join(".reprobisect.toml"),
+            r#"
+[build]
+image = "unused"
+command = ["true"]
+outputs = ["out"]
+[execution.resources]
+cpus = 2
+[experiments.dimensions]
+cpu_count = true
+"#,
+        )
+        .unwrap();
+        let error = Config::load(project.path())
+            .expect_err("fixed CPU policy cannot be the tested dimension");
+        assert!(error.to_string().contains("conflict"), "{error:#}");
+    }
+
+    #[test]
     fn parses_minimal_config() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["sh", "-lc", "make"]
             outputs = ["build/app"]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(config.build.runner, RunnerBackend::Docker);
         assert_eq!(config.build.log_capture_max_bytes, 1024 * 1024);
         assert_eq!(config.experiments.control_runs, 2);
@@ -493,32 +729,54 @@ mod tests {
 
         let mut config: Config = toml::from_str(base).unwrap();
         config.experiments.control_runs = 33;
-        assert!(config.validate(project.path()).unwrap_err().to_string().contains("control_runs"));
+        assert!(
+            config
+                .validate(project.path())
+                .unwrap_err()
+                .to_string()
+                .contains("control_runs")
+        );
 
         let mut config: Config = toml::from_str(base).unwrap();
         config.experiments.intervention_runs = 33;
-        assert!(config.validate(project.path()).unwrap_err().to_string().contains("intervention_runs"));
+        assert!(
+            config
+                .validate(project.path())
+                .unwrap_err()
+                .to_string()
+                .contains("intervention_runs")
+        );
 
         let mut config: Config = toml::from_str(base).unwrap();
         config.build.log_capture_max_bytes = 16 * 1024 * 1024 + 1;
-        assert!(config.validate(project.path()).unwrap_err().to_string().contains("log_capture_max_bytes"));
+        assert!(
+            config
+                .validate(project.path())
+                .unwrap_err()
+                .to_string()
+                .contains("log_capture_max_bytes")
+        );
     }
 
     #[test]
     fn parses_podman_runner() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             runner = "podman"
             image = "docker.io/library/gcc:14"
             command = ["true"]
             outputs = ["out"]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(config.build.runner, RunnerBackend::Podman);
     }
 
     #[test]
     fn parses_environment_intervention() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
@@ -526,7 +784,9 @@ mod tests {
 
             [experiments.environment_variables]
             BUILD_FLAVOR = ["alpha", "beta"]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(
             config.experiments.environment_variables["BUILD_FLAVOR"],
             vec!["alpha".to_string(), "beta".to_string()]
@@ -535,7 +795,8 @@ mod tests {
 
     #[test]
     fn parses_toolchain_image_variants() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
@@ -546,8 +807,13 @@ mod tests {
 
             [experiments.dimensions]
             network_access = true
-        "#).unwrap();
-        assert_eq!(config.experiments.image_variants, vec!["gcc:15".to_string()]);
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.experiments.image_variants,
+            vec!["gcc:15".to_string()]
+        );
         assert!(config.experiments.dimensions.network_access);
     }
 
@@ -556,7 +822,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("requirements.txt"), "demo==1\n").unwrap();
         fs::write(temp.path().join("requirements.variant.txt"), "demo==2\n").unwrap();
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
@@ -578,7 +845,9 @@ mod tests {
             id = "requirements-demo"
             target = "requirements.txt"
             variant_file = "requirements.variant.txt"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         config.validate(temp.path()).unwrap();
         assert_eq!(config.experiments.toolchain_variables["CC"][0], "gcc");
         assert_eq!(config.experiments.dependency_variants.len(), 1);
@@ -594,7 +863,8 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_toolchain_and_environment_dimension() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["true"]
@@ -605,10 +875,14 @@ mod tests {
 
             [experiments.environment_variables]
             CC = ["gcc", "clang"]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let temp = tempfile::tempdir().unwrap();
         let error = config.validate(temp.path()).unwrap_err();
-        assert!(format!("{error:#}").contains("conflicts with experiments.environment_variables.CC"));
+        assert!(
+            format!("{error:#}").contains("conflicts with experiments.environment_variables.CC")
+        );
     }
 
     #[test]
@@ -620,12 +894,15 @@ mod tests {
 
     #[test]
     fn rejects_parent_output_path() {
-        let config: Config = toml::from_str(r#"
+        let config: Config = toml::from_str(
+            r#"
             [build]
             image = "gcc:14"
             command = ["make"]
             outputs = ["../escape"]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let temp = tempfile::tempdir().unwrap();
         assert!(config.validate(temp.path()).is_err());
     }

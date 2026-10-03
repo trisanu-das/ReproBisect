@@ -1,3 +1,4 @@
+pub(crate) mod budget;
 mod compare;
 mod control;
 mod ddmin;

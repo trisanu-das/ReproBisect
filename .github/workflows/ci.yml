@@ -47,6 +47,8 @@ jobs:
       - run: ./scripts/test-fixtures.sh
       - name: CI envelope real-container subprocess contract
         run: cargo test --locked --test cli ci_live_ -- --ignored
+      - name: Docker bounded execution and owned cleanup
+        run: cargo test --locked --test cli p02_live_docker_ -- --ignored --test-threads=1
 
   podman:
     runs-on: ubuntu-latest
@@ -58,6 +60,8 @@ jobs:
           toolchain: 1.85.1
       - run: sudo apt-get update && sudo apt-get install -y podman
       - run: ./scripts/test-podman.sh
+      - name: Podman bounded execution and owned cleanup
+        run: cargo test --locked --test cli p02_live_podman_ -- --ignored --test-threads=1
 
   real-world-smoke:
     runs-on: ubuntu-latest

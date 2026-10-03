@@ -111,6 +111,8 @@ pub fn inspect_project(project: &Path) -> DoctorReport {
         }
     };
 
+    let context = crate::engine::budget::ExecutionContext::new(&config.execution)
+        .expect("validated execution configuration");
     let runner = config.build.runner;
     report.runner = Some(runner);
     report.push(
@@ -140,7 +142,7 @@ pub fn inspect_project(project: &Path) -> DoctorReport {
     );
 
     let executable = runner.executable();
-    let executable_available = match run(executable, &["--version"]) {
+    let executable_available = match run(&context, executable, &["--version"]) {
         Ok(output) if output.status.success() => {
             let version = output_summary(&output);
             report.push(
@@ -197,11 +199,12 @@ pub fn inspect_project(project: &Path) -> DoctorReport {
             "runtime check did not pass",
             None,
         );
+        finish_execution(&mut report, &context, project);
         report.finish();
         return report;
     }
 
-    let runtime_ready = match run(executable, &["info"]) {
+    let runtime_ready = match run(&context, executable, &["info"]) {
         Ok(output) if output.status.success() => {
             report.push(
                 "runtime",
@@ -235,7 +238,7 @@ pub fn inspect_project(project: &Path) -> DoctorReport {
     };
 
     if runtime_ready {
-        match run(executable, &["image", "inspect", &config.build.image]) {
+        match run(&context, executable, &["image", "inspect", &config.build.image]) {
             Ok(output) if output.status.success() => report.push(
                 "build image",
                 DoctorStatus::Pass,
@@ -270,8 +273,27 @@ pub fn inspect_project(project: &Path) -> DoctorReport {
         );
     }
 
+    finish_execution(&mut report, &context, project);
     report.finish();
     report
+}
+fn finish_execution(
+    report: &mut DoctorReport,
+    context: &crate::engine::budget::ExecutionContext,
+    project: &Path,
+) {
+    let _ = context.check();
+    if let Some(reason) = context.reason() {
+        report.push("execution completion", DoctorStatus::Fail, reason, None);
+    }
+    if let Err(error) = context.finish(project, Ok(())) {
+        report.push(
+            "execution completion",
+            DoctorStatus::Fail,
+            format!("execution receipt failed: {error:#}"),
+            None,
+        );
+    }
 }
 
 pub fn print_text(report: &DoctorReport) {
@@ -283,21 +305,27 @@ pub fn print_text(report: &DoctorReport) {
     println!();
 
     for check in &report.checks {
-        println!("[{}] {}: {}", check.status.label(), check.name, check.detail);
+        println!(
+            "[{}] {}: {}",
+            check.status.label(),
+            check.name,
+            check.detail
+        );
         if let Some(hint) = &check.hint {
             println!("       hint: {hint}");
         }
     }
 
     println!();
-    println!(
-        "ready: {}",
-        if report.ready { "YES" } else { "NO" }
-    );
+    println!("ready: {}", if report.ready { "YES" } else { "NO" });
 }
 
-fn run(executable: &str, args: &[&str]) -> std::io::Result<Output> {
-    Command::new(executable).args(args).output()
+fn run(
+    context: &crate::engine::budget::ExecutionContext,
+    executable: &str,
+    args: &[&str],
+) -> anyhow::Result<Output> {
+    context.output(Command::new(executable).args(args))
 }
 
 fn output_summary(output: &Output) -> String {
@@ -331,9 +359,7 @@ fn runtime_hint(runner: RunnerBackend) -> String {
         RunnerBackend::Docker => {
             "start Docker and verify `docker info` succeeds for the current user".to_string()
         }
-        RunnerBackend::Podman => {
-            "verify `podman info` succeeds for the current user".to_string()
-        }
+        RunnerBackend::Podman => "verify `podman info` succeeds for the current user".to_string(),
     }
 }
 
@@ -359,8 +385,11 @@ mod tests {
     #[test]
     fn invalid_config_is_reported_without_invoking_a_runtime() {
         let dir = tempdir().expect("tempdir");
-        fs::write(dir.path().join(".reprobisect.toml"), "[build]\nimage = \"\"\n")
-            .expect("write config");
+        fs::write(
+            dir.path().join(".reprobisect.toml"),
+            "[build]\nimage = \"\"\n",
+        )
+        .expect("write config");
 
         let report = inspect_project(dir.path());
 
@@ -381,6 +410,71 @@ mod tests {
         report.finish();
 
         assert!(report.ready);
+    }
+
+    #[test]
+    #[ignore = "subprocess hang fixture only"]
+    fn infrastructure_hang_fixture() {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn cancellation_interrupts_launched_probe_without_refunding() {
+        let context = crate::engine::budget::ExecutionContext::new(
+            &crate::config::ExecutionConfig::default(),
+        )
+        .unwrap();
+        let canceller = context.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            canceller.cancel();
+        });
+        let started = std::time::Instant::now();
+        let executable = std::env::current_exe().unwrap();
+        let result = run(
+            &context,
+            executable.to_str().unwrap(),
+            &[
+                "--exact",
+                "doctor::tests::infrastructure_hang_fixture",
+                "--ignored",
+            ],
+        );
+        thread.join().unwrap();
+        assert!(result.is_err(), "cancel must interrupt dispatched work");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(context.reason(), Some("cancelled"));
+        assert!(
+            context.reserve(4096).is_err(),
+            "launched cancelled work is not free"
+        );
+    }
+
+    #[test]
+    fn infrastructure_hangs_obey_shared_deadline() {
+        let context =
+            crate::engine::budget::ExecutionContext::new(&crate::config::ExecutionConfig {
+                total_timeout_seconds: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        let started = std::time::Instant::now();
+        let executable = std::env::current_exe().unwrap();
+        let result = run(
+            &context,
+            executable.to_str().unwrap(),
+            &[
+                "--exact",
+                "doctor::tests::infrastructure_hang_fixture",
+                "--ignored",
+            ],
+        );
+        assert!(
+            result.is_err(),
+            "hung probe must not be accepted as completed"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(context.reason(), Some("deadline_exhausted"));
     }
 
     #[test]

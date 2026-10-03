@@ -18,11 +18,11 @@ use crate::{
     },
     runner::{Runner, configured_runner},
     schema::FIX_REPORT_SCHEMA_CURRENT,
-    source::{copy_source_tree, digest_tree, sha256_file},
+    source::{copy_source_tree_with_context, digest_tree_with_context, sha256_file},
 };
 
 use super::{
-    control::{CheckOptions, check_project},
+    control::{CheckOptions, check_project_with_context},
     interventions::{baseline_environment, plan_interventions},
 };
 
@@ -37,11 +37,21 @@ pub struct FixOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProjectPatchOperation {
-    Append { text: String },
-    InsertAfterLine { line_number: usize, text: String },
-    Create { text: String },
+    Append {
+        text: String,
+    },
+    InsertAfterLine {
+        line_number: usize,
+        text: String,
+    },
+    Create {
+        text: String,
+    },
     /// Replace exactly one expected literal site in an existing text file.
-    ReplaceText { expected: String, replacement: String },
+    ReplaceText {
+        expected: String,
+        replacement: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,13 +112,26 @@ pub fn fix_project(
     config: &Config,
     options: &FixOptions,
 ) -> Result<FixReport> {
-    let diagnosis = check_project(project_root, config, &options.check)?;
+    let context = super::budget::ExecutionContext::new(&config.execution)?;
+    let result = fix_project_with_context(project_root, config, options, &context);
+    context.finish(project_root, result)
+}
+fn fix_project_with_context(
+    project_root: &Path,
+    config: &Config,
+    options: &FixOptions,
+    context: &super::budget::ExecutionContext,
+) -> Result<FixReport> {
+    let diagnosis = check_project_with_context(project_root, config, &options.check, context)?;
     let candidates = generate_fix_plans(project_root, config, &diagnosis);
 
     let mut verifications = Vec::new();
     if options.verify {
         for plan in &candidates {
-            verifications.push(verify_plan(project_root, config, &diagnosis, plan));
+            if context.check().is_err() {
+                break;
+            }
+            verifications.push(verify_plan(project_root, config, &diagnosis, plan, context));
         }
     }
 
@@ -136,6 +159,10 @@ pub fn fix_project(
         verifications,
         notes,
     };
+    let mut report = report;
+    if let Some(reason) = context.reason() {
+        report.notes.push(format!("execution_completion={reason}"));
+    }
     persist_fix_report(project_root, &report)?;
     Ok(report)
 }
@@ -156,8 +183,9 @@ fn generate_fix_plans(project_root: &Path, config: &Config, report: &CheckReport
             InterventionKind::SourceDateEpoch => {
                 plans.push(source_date_epoch_plan(project_root, config, result));
             }
-            InterventionKind::SourceMtime if has_archive_field(result, ArchiveMetadataField::Mtime)
-                || has_archive_field(result, ArchiveMetadataField::ContainerMtime) =>
+            InterventionKind::SourceMtime
+                if has_archive_field(result, ArchiveMetadataField::Mtime)
+                    || has_archive_field(result, ArchiveMetadataField::ContainerMtime) =>
             {
                 plans.push(source_mtime_plan(project_root, config, result));
             }
@@ -217,9 +245,7 @@ fn path_remap_plan(
     let gcc_append = format!(
         "-ffile-prefix-map={baseline}=. -fdebug-prefix-map={baseline}=. -ffile-prefix-map={variant}=. -fdebug-prefix-map={variant}=."
     );
-    let rust_append = format!(
-        "--remap-path-prefix={baseline}=. --remap-path-prefix={variant}=."
-    );
+    let rust_append = format!("--remap-path-prefix={baseline}=. --remap-path-prefix={variant}=.");
 
     let mut suggested = BTreeMap::new();
     suggested.insert("CFLAGS".to_string(), gcc_append.clone());
@@ -240,7 +266,9 @@ fn path_remap_plan(
         &rust_append,
     );
     let automatic_verification_supported = project_patch.is_some()
-        || suggested.keys().any(|key| config.build.env.contains_key(key));
+        || suggested
+            .keys()
+            .any(|key| config.build.env.contains_key(key));
     let mut evidence = Vec::new();
     for delta in result.artifact_deltas.iter().filter(|delta| delta.changed) {
         for location in &delta.elf_marker_location_evidence {
@@ -287,7 +315,11 @@ fn path_remap_plan(
     }
 }
 
-fn source_date_epoch_plan(project_root: &Path, config: &Config, result: &InterventionResult) -> FixPlan {
+fn source_date_epoch_plan(
+    project_root: &Path,
+    config: &Config,
+    result: &InterventionResult,
+) -> FixPlan {
     let value = result.intervention.baseline_value.clone();
     let mut overrides = BTreeMap::new();
     overrides.insert("SOURCE_DATE_EPOCH".to_string(), value.clone());
@@ -350,10 +382,15 @@ fn source_mtime_plan(project_root: &Path, config: &Config, result: &Intervention
     let mut evidence = Vec::new();
     for delta in result.artifact_deltas.iter().filter(|delta| delta.changed) {
         for difference in &delta.archive_metadata_evidence {
-            if matches!(difference.field, ArchiveMetadataField::Mtime | ArchiveMetadataField::ContainerMtime) {
+            if matches!(
+                difference.field,
+                ArchiveMetadataField::Mtime | ArchiveMetadataField::ContainerMtime
+            ) {
                 evidence.push(format!(
                     "{} archive {:?} changed for {:?}",
-                    delta.logical_path.display(), difference.field, difference.member
+                    delta.logical_path.display(),
+                    difference.field,
+                    difference.member
                 ));
             }
         }
@@ -470,22 +507,20 @@ fn unique_literal_replacement(
             matches.push((expected.clone(), replacement.clone()));
         }
     }
-    if matches.len() == 1 { matches.pop() } else { None }
+    if matches.len() == 1 {
+        matches.pop()
+    } else {
+        None
+    }
 }
 
-fn cmake_archive_patch(
-    project_root: &Path,
-    id: &str,
-    tar_options: &str,
-) -> Option<ProjectPatch> {
+fn cmake_archive_patch(project_root: &Path, id: &str, tar_options: &str) -> Option<ProjectPatch> {
     let relative = PathBuf::from("CMakeLists.txt");
     let text = fs::read_to_string(project_root.join(&relative)).ok()?;
     if text.contains(&format!("ReproBisect candidate: {id}")) {
         return None;
     }
-    let env_prefix = format!(
-        "COMMAND ${{CMAKE_COMMAND}} -E env \"TAR_OPTIONS={tar_options}\" "
-    );
+    let env_prefix = format!("COMMAND ${{CMAKE_COMMAND}} -E env \"TAR_OPTIONS={tar_options}\" ");
     let candidates = vec![
         ("COMMAND tar ".to_string(), format!("{env_prefix}tar ")),
         (
@@ -497,11 +532,7 @@ fn cmake_archive_patch(
     replace_text_patch(project_root, relative, &expected, &replacement)
 }
 
-fn meson_archive_patch(
-    project_root: &Path,
-    id: &str,
-    tar_options: &str,
-) -> Option<ProjectPatch> {
+fn meson_archive_patch(project_root: &Path, id: &str, tar_options: &str) -> Option<ProjectPatch> {
     let relative = PathBuf::from("meson.build");
     let text = fs::read_to_string(project_root.join(&relative)).ok()?;
     if text.contains(&format!("ReproBisect candidate: {id}")) {
@@ -541,7 +572,9 @@ fn command_shell_scripts(config: &Config) -> Vec<PathBuf> {
             }
             let path = PathBuf::from(token);
             if path.is_absolute()
-                || path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                || path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
             {
                 continue;
             }
@@ -668,11 +701,7 @@ fn archive_mode_project_patch(
 }
 
 fn build_command_hint(config: &Config) -> String {
-    config
-        .build
-        .command
-        .join(" ")
-        .to_ascii_lowercase()
+    config.build.command.join(" ").to_ascii_lowercase()
 }
 
 fn append_existing_patch(
@@ -802,9 +831,21 @@ fn replace_text_patch(
     }
     let expected_sha256 = sha256_file(&path).ok()?;
     let index = original.find(expected)?;
-    let line_number = original[..index].bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let old_lines = expected.lines().map(|line| format!("-{line}")).collect::<Vec<_>>().join("\n");
-    let new_lines = replacement.lines().map(|line| format!("+{line}")).collect::<Vec<_>>().join("\n");
+    let line_number = original[..index]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
+    let old_lines = expected
+        .lines()
+        .map(|line| format!("-{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new_lines = replacement
+        .lines()
+        .map(|line| format!("+{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let unified_diff = format!(
         "--- a/{path}\n+++ b/{path}\n@@ -{line_number},{} +{line_number},{} @@\n{old_lines}\n{new_lines}\n",
         expected.lines().count().max(1),
@@ -1039,8 +1080,9 @@ fn apply_project_patch(root: &Path, patch: &ProjectPatch) -> Result<()> {
                     format!("cannot create project patch directory {}", parent.display())
                 })?;
             }
-            fs::write(&path, text)
-                .with_context(|| format!("cannot create project patch target {}", path.display()))?;
+            fs::write(&path, text).with_context(|| {
+                format!("cannot create project patch target {}", path.display())
+            })?;
         }
         ProjectPatchOperation::Append { text } => {
             verify_project_patch_precondition(&path, patch)?;
@@ -1055,9 +1097,14 @@ fn apply_project_patch(root: &Path, patch: &ProjectPatch) -> Result<()> {
             verify_project_patch_precondition(&path, patch)?;
             let original = fs::read_to_string(&path)
                 .with_context(|| format!("cannot read project patch target {}", path.display()))?;
-            let insertion_offset = insertion_offset_after_line(&original, *line_number).with_context(|| {
-                format!("project patch line {} is no longer valid for {}", line_number, patch.path.display())
-            })?;
+            let insertion_offset = insertion_offset_after_line(&original, *line_number)
+                .with_context(|| {
+                    format!(
+                        "project patch line {} is no longer valid for {}",
+                        line_number,
+                        patch.path.display()
+                    )
+                })?;
             let mut updated = String::with_capacity(original.len() + text.len() + 1);
             updated.push_str(&original[..insertion_offset]);
             if insertion_offset == original.len() && !original.ends_with('\n') {
@@ -1068,7 +1115,10 @@ fn apply_project_patch(root: &Path, patch: &ProjectPatch) -> Result<()> {
             fs::write(&path, updated)
                 .with_context(|| format!("cannot write project patch target {}", path.display()))?;
         }
-        ProjectPatchOperation::ReplaceText { expected, replacement } => {
+        ProjectPatchOperation::ReplaceText {
+            expected,
+            replacement,
+        } => {
             verify_project_patch_precondition(&path, patch)?;
             let original = fs::read_to_string(&path)
                 .with_context(|| format!("cannot read project patch target {}", path.display()))?;
@@ -1090,7 +1140,10 @@ fn verify_project_patch_precondition(path: &Path, patch: &ProjectPatch) -> Resul
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("cannot stat project patch target {}", path.display()))?;
     if !metadata.file_type().is_file() {
-        anyhow::bail!("project patch target {} is not a regular file", patch.path.display());
+        anyhow::bail!(
+            "project patch target {} is not a regular file",
+            patch.path.display()
+        );
     }
     let expected = patch
         .expected_sha256
@@ -1142,6 +1195,7 @@ fn verify_plan(
     config: &Config,
     diagnosis: &CheckReport,
     plan: &FixPlan,
+    context: &super::budget::ExecutionContext,
 ) -> FixVerification {
     if !plan.automatic_verification_supported {
         return FixVerification {
@@ -1159,7 +1213,7 @@ fn verify_plan(
         };
     }
 
-    match verify_plan_inner(project_root, config, diagnosis, plan) {
+    match verify_plan_inner(project_root, config, diagnosis, plan, context) {
         Ok(verification) => verification,
         Err(error) => FixVerification {
             plan_id: plan.id.clone(),
@@ -1179,13 +1233,14 @@ fn verify_plan_inner(
     config: &Config,
     diagnosis: &CheckReport,
     plan: &FixPlan,
+    context: &super::budget::ExecutionContext,
 ) -> Result<FixVerification> {
     let patch_workspace = if plan.project_patch.is_some() {
         let temp = tempfile::Builder::new()
             .prefix("reprobisect-fix-verify-")
             .tempdir()
             .context("cannot create temporary project-patch verification tree")?;
-        copy_source_tree(project_root, temp.path(), SourceCopyOrder::Sorted)?;
+        copy_source_tree_with_context(project_root, temp.path(), SourceCopyOrder::Sorted, context)?;
         apply_project_patch(
             temp.path(),
             plan.project_patch
@@ -1206,7 +1261,8 @@ fn verify_plan_inner(
         config.clone()
     };
 
-    let source_digest = digest_tree(verification_root).context("failed to digest verification source tree")?;
+    let source_digest = digest_tree_with_context(verification_root, context)
+        .context("failed to digest verification source tree")?;
     if plan.project_patch.is_none() && source_digest != diagnosis.source_digest {
         anyhow::bail!(
             "source tree changed after diagnosis (diagnosed {}, now {}); refusing to verify against a different source snapshot",
@@ -1236,9 +1292,7 @@ fn verify_plan_inner(
     let mut baseline = baseline_environment(&verification_config);
     let mut planned = plan_interventions(&verification_config, &baseline)
         .into_iter()
-        .find(|candidate| {
-            candidate.intervention.variable.as_str() == plan.causal_variable.as_str()
-        })
+        .find(|candidate| candidate.intervention.variable.as_str() == plan.causal_variable.as_str())
         .with_context(|| {
             format!(
                 "cannot recover original intervention for {}",
@@ -1250,21 +1304,20 @@ fn verify_plan_inner(
         apply_plan_to_environments(plan, &mut baseline, &mut planned.environment)?;
     }
 
-    let runner = configured_runner(verification_root, verification_config.build.runner);
+    let runner = configured_runner(
+        verification_root,
+        verification_config.build.runner,
+        context.clone(),
+    );
     runner.available()?;
+    let runner = runner.reserve_group(2 * VERIFICATION_RUNS)?;
     let experiment_id = Uuid::new_v4();
     let mut ordinal = 1_usize;
     let mut baseline_runs = Vec::new();
     let mut intervention_runs = Vec::new();
 
     for _ in 0..VERIFICATION_RUNS {
-        let run = runner.run(
-            &spec,
-            experiment_id,
-            &source_digest,
-            ordinal,
-            &baseline,
-        )?;
+        let run = runner.run(&spec, experiment_id, &source_digest, ordinal, &baseline)?;
         persist_run(project_root, &run)?;
         baseline_runs.push(run);
         ordinal += 1;
@@ -1302,7 +1355,10 @@ fn verify_plan_inner(
             patch.path.display()
         ));
     } else {
-        evidence.push("verification used an operational normalization without modifying project files".to_string());
+        evidence.push(
+            "verification used an operational normalization without modifying project files"
+                .to_string(),
+        );
     }
     evidence.push(format!(
         "fixed intervention was byte-stable across {} run(s): {}",
@@ -1374,7 +1430,9 @@ fn runs_stable(runs: &[BuildRun]) -> bool {
     let Some(first) = runs.first() else {
         return false;
     };
-    runs.iter().skip(1).all(|run| same_artifact_hashes(first, run))
+    runs.iter()
+        .skip(1)
+        .all(|run| same_artifact_hashes(first, run))
 }
 
 fn same_artifact_hashes(left: &BuildRun, right: &BuildRun) -> bool {
@@ -1392,8 +1450,12 @@ fn same_artifact_hashes(left: &BuildRun, right: &BuildRun) -> bool {
 
 fn persist_fix_report(project_root: &Path, report: &FixReport) -> Result<PathBuf> {
     let directory = project_root.join(".reprobisect").join("fixes");
-    fs::create_dir_all(&directory)
-        .with_context(|| format!("cannot create fix evidence directory {}", directory.display()))?;
+    fs::create_dir_all(&directory).with_context(|| {
+        format!(
+            "cannot create fix evidence directory {}",
+            directory.display()
+        )
+    })?;
     let path = directory.join(format!("{}.json", report.diagnosis.experiment_id));
     let bytes = serde_json::to_vec_pretty(report).context("cannot serialize fix report")?;
     let mut file = OpenOptions::new()
@@ -1413,7 +1475,10 @@ mod tests {
 
     #[test]
     fn append_flags_preserves_existing_flags() {
-        assert_eq!(append_flags("-O2", "-fdebug-prefix-map=/a=."), "-O2 -fdebug-prefix-map=/a=.");
+        assert_eq!(
+            append_flags("-O2", "-fdebug-prefix-map=/a=."),
+            "-O2 -fdebug-prefix-map=/a=."
+        );
     }
 
     #[test]
@@ -1494,7 +1559,6 @@ mod tests {
         assert!(format!("{error:#}").contains("refusing to apply stale patch"));
     }
 
-
     #[test]
     fn build_system_specific_path_patches_are_minimal_and_applicable() {
         let gcc = "-ffile-prefix-map=/workspace=. -fdebug-prefix-map=/workspace=.";
@@ -1515,10 +1579,20 @@ mod tests {
             "#,
         )
         .unwrap();
-        let patch = path_project_patch(cmake.path(), &cmake_config, "cmake-test", "build", gcc, rust)
-            .expect("expected CMake patch");
+        let patch = path_project_patch(
+            cmake.path(),
+            &cmake_config,
+            "cmake-test",
+            "build",
+            gcc,
+            rust,
+        )
+        .expect("expected CMake patch");
         assert_eq!(patch.path, PathBuf::from("CMakeLists.txt"));
-        assert!(matches!(&patch.operation, ProjectPatchOperation::Append { .. }));
+        assert!(matches!(
+            &patch.operation,
+            ProjectPatchOperation::Append { .. }
+        ));
         apply_project_patch(cmake.path(), &patch).unwrap();
         let updated = fs::read_to_string(cmake.path().join("CMakeLists.txt")).unwrap();
         assert!(updated.contains("CMAKE_C_FLAGS"));
@@ -1539,13 +1613,25 @@ mod tests {
             "#,
         )
         .unwrap();
-        let patch = path_project_patch(meson.path(), &meson_config, "meson-test", "build", gcc, rust)
-            .expect("expected Meson patch");
+        let patch = path_project_patch(
+            meson.path(),
+            &meson_config,
+            "meson-test",
+            "build",
+            gcc,
+            rust,
+        )
+        .expect("expected Meson patch");
         assert_eq!(patch.path, PathBuf::from("meson.build"));
-        assert!(matches!(&patch.operation, ProjectPatchOperation::InsertAfterLine { .. }));
+        assert!(matches!(
+            &patch.operation,
+            ProjectPatchOperation::InsertAfterLine { .. }
+        ));
         apply_project_patch(meson.path(), &patch).unwrap();
         let updated = fs::read_to_string(meson.path().join("meson.build")).unwrap();
-        assert!(updated.find("add_project_arguments").unwrap() < updated.find("executable(").unwrap());
+        assert!(
+            updated.find("add_project_arguments").unwrap() < updated.find("executable(").unwrap()
+        );
 
         let cargo = tempfile::tempdir().unwrap();
         fs::write(
@@ -1562,10 +1648,20 @@ mod tests {
             "#,
         )
         .unwrap();
-        let patch = path_project_patch(cargo.path(), &cargo_config, "cargo-test", "build", gcc, rust)
-            .expect("expected Cargo patch");
+        let patch = path_project_patch(
+            cargo.path(),
+            &cargo_config,
+            "cargo-test",
+            "build",
+            gcc,
+            rust,
+        )
+        .expect("expected Cargo patch");
         assert_eq!(patch.path, PathBuf::from(".cargo/config.toml"));
-        assert!(matches!(&patch.operation, ProjectPatchOperation::Create { .. }));
+        assert!(matches!(
+            &patch.operation,
+            ProjectPatchOperation::Create { .. }
+        ));
         apply_project_patch(cargo.path(), &patch).unwrap();
         let updated = fs::read_to_string(cargo.path().join(".cargo/config.toml")).unwrap();
         assert!(updated.contains("--remap-path-prefix=/workspace=."));
@@ -1622,9 +1718,13 @@ mod tests {
             "#,
         )
         .unwrap();
-        let patch = archive_mtime_project_patch(cmake.path(), &cmake_config, "cmake-mtime", "946684800")
-            .expect("expected one-site CMake archive patch");
-        assert!(matches!(&patch.operation, ProjectPatchOperation::ReplaceText { .. }));
+        let patch =
+            archive_mtime_project_patch(cmake.path(), &cmake_config, "cmake-mtime", "946684800")
+                .expect("expected one-site CMake archive patch");
+        assert!(matches!(
+            &patch.operation,
+            ProjectPatchOperation::ReplaceText { .. }
+        ));
         apply_project_patch(cmake.path(), &patch).unwrap();
         let updated = fs::read_to_string(cmake.path().join("CMakeLists.txt")).unwrap();
         assert!(updated.contains("${CMAKE_COMMAND} -E env"));
@@ -1647,13 +1747,22 @@ mod tests {
         .unwrap();
         let patch = archive_mode_project_patch(meson.path(), &meson_config, "meson-mode")
             .expect("expected one-site Meson archive patch");
-        assert!(matches!(&patch.operation, ProjectPatchOperation::ReplaceText { .. }));
+        assert!(matches!(
+            &patch.operation,
+            ProjectPatchOperation::ReplaceText { .. }
+        ));
         apply_project_patch(meson.path(), &patch).unwrap();
         let updated = fs::read_to_string(meson.path().join("meson.build")).unwrap();
-        assert!(updated.contains("run_command('env', 'TAR_OPTIONS=--mode=u+rwX,go+rX,go-w', 'tar',"));
+        assert!(
+            updated.contains("run_command('env', 'TAR_OPTIONS=--mode=u+rwX,go+rX,go-w', 'tar',")
+        );
 
         let shell = tempfile::tempdir().unwrap();
-        fs::write(shell.path().join("package.sh"), "#!/bin/sh\nset -eu\ntar -cf build/out.tar payload.txt\n").unwrap();
+        fs::write(
+            shell.path().join("package.sh"),
+            "#!/bin/sh\nset -eu\ntar -cf build/out.tar payload.txt\n",
+        )
+        .unwrap();
         let shell_config: Config = toml::from_str(
             r#"
             [build]
@@ -1663,8 +1772,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        let patch = archive_mtime_project_patch(shell.path(), &shell_config, "shell-mtime", "946684800")
-            .expect("expected one-site shell archive patch");
+        let patch =
+            archive_mtime_project_patch(shell.path(), &shell_config, "shell-mtime", "946684800")
+                .expect("expected one-site shell archive patch");
         assert_eq!(patch.path, PathBuf::from("package.sh"));
         apply_project_patch(shell.path(), &patch).unwrap();
         let updated = fs::read_to_string(shell.path().join("package.sh")).unwrap();
@@ -1688,7 +1798,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert!(archive_mtime_project_patch(cmake.path(), &cmake_config, "ambiguous", "1").is_none());
+        assert!(
+            archive_mtime_project_patch(cmake.path(), &cmake_config, "ambiguous", "1").is_none()
+        );
 
         let meson = tempfile::tempdir().unwrap();
         fs::write(
@@ -1711,32 +1823,55 @@ mod tests {
     #[test]
     fn operational_fix_transforms_neutralize_the_original_dimension() {
         let mut baseline = ControlledEnvironment::default();
-        baseline.environment.insert("SOURCE_DATE_EPOCH".into(), "1".into());
+        baseline
+            .environment
+            .insert("SOURCE_DATE_EPOCH".into(), "1".into());
         baseline.source_mtime_epoch = Some(1);
         baseline.umask = Some(0o022);
         let mut variant = baseline.clone();
-        variant.environment.insert("SOURCE_DATE_EPOCH".into(), "2".into());
+        variant
+            .environment
+            .insert("SOURCE_DATE_EPOCH".into(), "2".into());
         variant.source_mtime_epoch = Some(2);
         variant.umask = Some(0o077);
 
         let mut overrides = BTreeMap::new();
         overrides.insert("SOURCE_DATE_EPOCH".into(), "1".into());
         let timestamp = FixPlan {
-            id: "timestamp".into(), title: String::new(), causal_variable: "SOURCE_DATE_EPOCH".into(),
-            strategy: "pin-source-date-epoch".into(), suggested_environment_appends: BTreeMap::new(),
-            suggested_environment_overrides: overrides, suggested_runner_controls: BTreeMap::new(),
-            suggested_shell_commands: vec![], project_patch: None, automatic_verification_supported: true, evidence: vec![], limitations: vec![],
+            id: "timestamp".into(),
+            title: String::new(),
+            causal_variable: "SOURCE_DATE_EPOCH".into(),
+            strategy: "pin-source-date-epoch".into(),
+            suggested_environment_appends: BTreeMap::new(),
+            suggested_environment_overrides: overrides,
+            suggested_runner_controls: BTreeMap::new(),
+            suggested_shell_commands: vec![],
+            project_patch: None,
+            automatic_verification_supported: true,
+            evidence: vec![],
+            limitations: vec![],
         };
         apply_plan_to_environments(&timestamp, &mut baseline, &mut variant).unwrap();
-        assert_eq!(baseline.environment["SOURCE_DATE_EPOCH"], variant.environment["SOURCE_DATE_EPOCH"]);
+        assert_eq!(
+            baseline.environment["SOURCE_DATE_EPOCH"],
+            variant.environment["SOURCE_DATE_EPOCH"]
+        );
 
         let mut mtime_controls = BTreeMap::new();
         mtime_controls.insert("source_mtime_epoch".into(), "1".into());
         let mtime = FixPlan {
-            id: "mtime".into(), title: String::new(), causal_variable: "source_mtime".into(),
-            strategy: "normalize-source-mtime".into(), suggested_environment_appends: BTreeMap::new(),
-            suggested_environment_overrides: BTreeMap::new(), suggested_runner_controls: mtime_controls,
-            suggested_shell_commands: vec![], project_patch: None, automatic_verification_supported: true, evidence: vec![], limitations: vec![],
+            id: "mtime".into(),
+            title: String::new(),
+            causal_variable: "source_mtime".into(),
+            strategy: "normalize-source-mtime".into(),
+            suggested_environment_appends: BTreeMap::new(),
+            suggested_environment_overrides: BTreeMap::new(),
+            suggested_runner_controls: mtime_controls,
+            suggested_shell_commands: vec![],
+            project_patch: None,
+            automatic_verification_supported: true,
+            evidence: vec![],
+            limitations: vec![],
         };
         apply_plan_to_environments(&mtime, &mut baseline, &mut variant).unwrap();
         assert_eq!(baseline.source_mtime_epoch, Some(1));
@@ -1745,14 +1880,21 @@ mod tests {
         let mut controls = BTreeMap::new();
         controls.insert("umask".into(), "022".into());
         let umask = FixPlan {
-            id: "umask".into(), title: String::new(), causal_variable: "umask".into(),
-            strategy: "pin-umask".into(), suggested_environment_appends: BTreeMap::new(),
-            suggested_environment_overrides: BTreeMap::new(), suggested_runner_controls: controls,
-            suggested_shell_commands: vec![], project_patch: None, automatic_verification_supported: true, evidence: vec![], limitations: vec![],
+            id: "umask".into(),
+            title: String::new(),
+            causal_variable: "umask".into(),
+            strategy: "pin-umask".into(),
+            suggested_environment_appends: BTreeMap::new(),
+            suggested_environment_overrides: BTreeMap::new(),
+            suggested_runner_controls: controls,
+            suggested_shell_commands: vec![],
+            project_patch: None,
+            automatic_verification_supported: true,
+            evidence: vec![],
+            limitations: vec![],
         };
         apply_plan_to_environments(&umask, &mut baseline, &mut variant).unwrap();
         assert_eq!(baseline.umask, Some(0o022));
         assert_eq!(variant.umask, Some(0o022));
     }
-
 }

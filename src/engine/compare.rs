@@ -14,7 +14,7 @@ use crate::{
     },
     runner::{RunOutcome, Runner, configured_runner},
     schema::{BUILD_EVIDENCE_SCHEMA_CURRENT, ENVIRONMENT_COMPARISON_SCHEMA_CURRENT},
-    source::{collect_source_provenance, digest_tree},
+    source::{collect_source_provenance, digest_tree_with_context},
 };
 
 use super::{
@@ -51,11 +51,84 @@ pub fn compare_environments(
     bad_manifest: &LoadedEnvironmentManifest,
     options: &CompareOptions,
 ) -> Result<EnvironmentComparisonReport> {
+    let context = super::budget::ExecutionContext::new(&config.execution)?;
+    let result = compare_with_context(
+        project_root,
+        config,
+        good_manifest,
+        bad_manifest,
+        options,
+        &context,
+    );
+    context.finish(project_root, result)
+}
+fn compare_with_context(
+    project_root: &Path,
+    config: &Config,
+    good_manifest: &LoadedEnvironmentManifest,
+    bad_manifest: &LoadedEnvironmentManifest,
+    options: &CompareOptions,
+    context: &super::budget::ExecutionContext,
+) -> Result<EnvironmentComparisonReport> {
     validate_options(options)?;
+    let finish_report = |project, report| finish_report(project, context, report);
+
+    let canonical = baseline_environment(config);
+    let good_environment = good_manifest.manifest.apply(&canonical, config)?;
+    let bad_environment = bad_manifest.manifest.apply(&canonical, config)?;
+    if context.resources.cpus.is_some() && good_environment.cpu_count != bad_environment.cpu_count {
+        bail!("fixed CPU resource policy conflicts with the compared cpu_count dimension");
+    }
+    if context.resources.network.is_some()
+        && good_environment.network_mode != bad_environment.network_mode
+    {
+        bail!("fixed network resource policy conflicts with the compared network dimension");
+    }
+    context.validate_environment(&good_environment)?;
+    context.validate_environment(&bad_environment)?;
 
     let experiment_id = Uuid::new_v4();
-    let source_digest = digest_tree(project_root)?;
-    let source_provenance = collect_source_provenance(project_root)?;
+    let mut source_digest = String::new();
+    let preparation = (|| {
+        context.check()?;
+        source_digest = digest_tree_with_context(project_root, context)?;
+        collect_source_provenance(project_root, context)
+    })();
+    let source_provenance = match preparation {
+        Ok(provenance) => provenance,
+        Err(error) if context.reason().is_some() => {
+            return finish_report(
+                project_root,
+                report_from_attempts(
+                    experiment_id,
+                    EnvironmentComparisonStatus::Inconclusive,
+                    source_digest,
+                    Default::default(),
+                    good_manifest,
+                    bad_manifest,
+                    EnvironmentComparisonOutcomeKind::Mixed,
+                    EnvironmentComparisonOutcomeKind::Mixed,
+                    EndpointAttempts::default(),
+                    EndpointAttempts::default(),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    0,
+                    EndpointAttempts::default(),
+                    None,
+                    None,
+                    None,
+                    vec![
+                        format!("preparation incomplete: {error:#}"),
+                        "an empty source_digest means source identity was not observed, not a hash"
+                            .into(),
+                    ],
+                ),
+            );
+        }
+        Err(error) => return Err(error),
+    };
     let spec = BuildSpec {
         image: config.build.image.clone(),
         command: config.build.command.clone(),
@@ -65,12 +138,13 @@ pub fn compare_environments(
         timeout_seconds: config.build.timeout_seconds,
         log_capture_max_bytes: config.build.log_capture_max_bytes,
     };
-    let runner = configured_runner(project_root, config.build.runner);
-    runner.available()?;
+    let runner = configured_runner(project_root, config.build.runner, context.clone());
 
-    let canonical = baseline_environment(config);
-    let good_environment = good_manifest.manifest.apply(&canonical, config)?;
-    let bad_environment = bad_manifest.manifest.apply(&canonical, config)?;
+    if let Err(error) = runner.available() {
+        if context.reason().is_none() {
+            return Err(error);
+        }
+    }
     let delta = diff_environments(&good_environment, &bad_environment);
     let delta_records = delta
         .iter()
@@ -264,7 +338,10 @@ pub fn compare_environments(
         );
     }
 
-    let outcome = ddmin::minimize(&delta, |subset| {
+    let mut subset_tests = 0;
+    let outcome_result = ddmin::minimize(&delta, |subset| {
+        context.check()?;
+        subset_tests += 1;
         let candidate_environment = apply_delta_subset(&good_environment, subset);
         let attempts = run_environment_attempts(
             project_root,
@@ -276,13 +353,28 @@ pub fn compare_environments(
             options.subset_runs,
             &mut ordinal,
         )?;
+        context.check()?;
         Ok(attempts_reproduce_reference(&attempts, &bad_reference))
-    })?;
+    });
+    let outcome = match outcome_result {
+        Ok(outcome) => outcome,
+        Err(_) if context.reason().is_some() => ddmin::DdminOutcome {
+            minimal: Vec::new(),
+            tests: subset_tests,
+        },
+        Err(error) => return Err(error),
+    };
+    let confirmation_runner =
+        match runner.reserve_group(options.subset_runs + options.confirmation_runs) {
+            Ok(group) => group,
+            Err(_) if context.reason().is_some() => runner.clone(),
+            Err(error) => return Err(error),
+        };
 
     let minimal_environment = apply_delta_subset(&good_environment, &outcome.minimal);
     let reproduction_attempts = run_environment_attempts(
         project_root,
-        &runner,
+        &confirmation_runner,
         &spec,
         experiment_id,
         &source_digest,
@@ -290,30 +382,31 @@ pub fn compare_environments(
         options.subset_runs,
         &mut ordinal,
     )?;
-    let reproduction_stable =
-        attempts_reproduce_reference(&reproduction_attempts, &bad_reference);
+    let reproduction_stable = attempts_reproduce_reference(&reproduction_attempts, &bad_reference);
 
     let mut confirmation_run = None;
     let mut confirmation_failure = None;
     let mut reverted_to_good = None;
-    if options.confirmation_runs == 1 {
-        match runner.run_attempt(
+    if options.confirmation_runs == 1 && context.reason().is_none() {
+        match confirmation_runner.run_attempt(
             &spec,
             experiment_id,
             &source_digest,
             ordinal,
             &good_environment,
-        )? {
-            RunOutcome::Success(run) => {
+        ) {
+            Ok(RunOutcome::Success(run)) => {
                 persist_run(project_root, &run)?;
                 reverted_to_good = Some(same_artifact_hashes(&good_artifact_reference, &run));
                 confirmation_run = Some(run);
             }
-            RunOutcome::BuildFailed(failure) => {
+            Ok(RunOutcome::BuildFailed(failure)) => {
                 persist_build_failure(project_root, &failure)?;
                 reverted_to_good = Some(false);
                 confirmation_failure = Some(failure);
             }
+            Err(_) if context.reason().is_some() => {}
+            Err(error) => return Err(error),
         }
     }
 
@@ -322,7 +415,7 @@ pub fn compare_environments(
         .iter()
         .map(|entry| entry.record.clone())
         .collect::<Vec<_>>();
-    let confirmation_ok = reverted_to_good != Some(false);
+    let confirmation_ok = options.confirmation_runs == 0 || reverted_to_good == Some(true);
     let status = if reproduction_stable && confirmation_ok {
         EnvironmentComparisonStatus::Minimized
     } else {
@@ -466,13 +559,13 @@ fn run_environment_attempts<R: Runner>(
         failures: Vec::with_capacity(run_count),
     };
     for _ in 0..run_count {
-        match runner.run_attempt(
-            spec,
-            experiment_id,
-            source_digest,
-            *ordinal,
-            environment,
-        )? {
+        let outcome = runner.run_attempt(spec, experiment_id, source_digest, *ordinal, environment);
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(_) if runner.execution().reason().is_some() => break,
+            Err(error) => return Err(error),
+        };
+        match outcome {
             RunOutcome::Success(run) => {
                 persist_run(project_root, &run)?;
                 attempts.runs.push(run);
@@ -528,8 +621,7 @@ fn attempts_reproduce_reference(
 ) -> bool {
     match reference {
         StableEndpointReference::Artifacts(reference_run) => {
-            attempts.failures.is_empty()
-                && runs_reproduce_reference(&attempts.runs, reference_run)
+            attempts.failures.is_empty() && runs_reproduce_reference(&attempts.runs, reference_run)
         }
         StableEndpointReference::Failure(reference_failure) => {
             attempts.runs.is_empty()
@@ -572,8 +664,21 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 
 fn finish_report(
     project_root: &Path,
-    report: EnvironmentComparisonReport,
+    context: &super::budget::ExecutionContext,
+    mut report: EnvironmentComparisonReport,
 ) -> Result<EnvironmentComparisonReport> {
+    let _ = context.check();
+    if let Some(reason) = context.reason() {
+        report.status = EnvironmentComparisonStatus::Inconclusive;
+        report.minimal_delta.clear();
+        report
+            .notes
+            .retain(|n| !n.starts_with("minimal_delta is 1-minimal"));
+        report
+            .notes
+            .push("minimization/confirmation incomplete; no confirmed minimality claim".into());
+        report.notes.push(format!("execution_completion={reason}"));
+    }
     persist_environment_comparison(project_root, &report)?;
     Ok(report)
 }
@@ -581,9 +686,7 @@ fn finish_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{
-        ArtifactRecord, ArtifactType, ControlledEnvironment, RunnerBackend,
-    };
+    use crate::model::{ArtifactRecord, ArtifactType, ControlledEnvironment, RunnerBackend};
     use std::{collections::BTreeMap, path::PathBuf};
 
     fn run_with_hash(hash: &str) -> BuildRun {
@@ -687,13 +790,19 @@ mod tests {
         let reference = StableEndpointReference::Failure(failure_signature(&bad));
         let exact = EndpointAttempts {
             runs: vec![],
-            failures: vec![failure(37, "", "known bad\n"), failure(37, "", "known bad\n")],
+            failures: vec![
+                failure(37, "", "known bad\n"),
+                failure(37, "", "known bad\n"),
+            ],
         };
         assert!(attempts_reproduce_reference(&exact, &reference));
 
         let wrong_diagnostic = EndpointAttempts {
             runs: vec![],
-            failures: vec![failure(37, "", "different\n"), failure(37, "", "different\n")],
+            failures: vec![
+                failure(37, "", "different\n"),
+                failure(37, "", "different\n"),
+            ],
         };
         assert!(!attempts_reproduce_reference(&wrong_diagnostic, &reference));
 

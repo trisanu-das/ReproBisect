@@ -5,13 +5,13 @@ use std::{
     net::IpAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
-    thread,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use filetime::{FileTime, set_file_mtime, set_file_times};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -21,15 +21,19 @@ use crate::{
     artifact::collect_artifacts,
     model::{
         BuildFailure, BuildRun, BuildSpec, ControlledEnvironment, DependencyCacheSummary,
-        DependencyNetworkCorrelation, NetworkTraceSummary, ProcessActivitySummary, ProcessTraceSummary,
-        RuntimeDependencyProvenance, SourceOverrideRecord, ToolchainBindingProbe, ToolchainProbe,
-        ToolchainProvenance, RunnerBackend,
+        DependencyNetworkCorrelation, NetworkTraceSummary, ProcessActivitySummary,
+        ProcessTraceSummary, RunnerBackend, RuntimeDependencyProvenance, SourceOverrideRecord,
+        ToolchainBindingProbe, ToolchainProbe, ToolchainProvenance,
     },
     runner::{RunOutcome, Runner},
     schema::BUILD_EVIDENCE_SCHEMA_CURRENT,
-    source::{collect_dependency_provenance, copy_source_tree, sha256_file},
+    source::{
+        collect_dependency_provenance, copy_file_with_context, copy_source_tree_with_context,
+        sha256_file_with_context,
+    },
 };
 
+#[cfg(test)]
 #[derive(Debug)]
 struct CapturedStream {
     text: String,
@@ -53,6 +57,7 @@ fn host_owner(path: &Path) -> Result<String> {
     }
 }
 
+#[cfg(test)]
 fn drain_bounded_stream<R: Read>(mut reader: R, max_bytes: u64) -> std::io::Result<CapturedStream> {
     let retain_limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
     let mut retained = Vec::with_capacity(retain_limit.min(64 * 1024));
@@ -86,20 +91,27 @@ fn drain_bounded_stream<R: Read>(mut reader: R, max_bytes: u64) -> std::io::Resu
     })
 }
 
+#[derive(Clone)]
 pub struct OciRunner {
+    context: crate::engine::budget::ExecutionContext,
     project_root: PathBuf,
     backend: RunnerBackend,
-    resolved_image_ids: Mutex<BTreeMap<String, String>>,
-    toolchain_cache: Mutex<BTreeMap<String, ToolchainProvenance>>,
+    resolved_image_ids: Arc<Mutex<BTreeMap<String, String>>>,
+    toolchain_cache: Arc<Mutex<BTreeMap<String, ToolchainProvenance>>>,
 }
 
 impl OciRunner {
-    pub fn new(project_root: PathBuf, backend: RunnerBackend) -> Self {
+    pub fn new(
+        project_root: PathBuf,
+        backend: RunnerBackend,
+        context: crate::engine::budget::ExecutionContext,
+    ) -> Self {
         Self {
+            context,
             project_root,
             backend,
-            resolved_image_ids: Mutex::new(BTreeMap::new()),
-            toolchain_cache: Mutex::new(BTreeMap::new()),
+            resolved_image_ids: Arc::new(Mutex::new(BTreeMap::new())),
+            toolchain_cache: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -112,10 +124,14 @@ impl OciRunner {
             .prefix("reprobisect-run-")
             .tempdir()
             .context("cannot create temporary build workspace")?;
-        copy_source_tree(&self.project_root, temp.path(), environment.source_copy_order)?;
+        copy_source_tree_with_context(
+            &self.project_root,
+            temp.path(),
+            environment.source_copy_order,
+            &self.context,
+        )?;
         Ok(temp)
     }
-
 
     fn apply_source_overrides(
         &self,
@@ -127,10 +143,16 @@ impl OciRunner {
             let target_path = workspace.join(target);
             let variant_path = workspace.join(variant_source);
             let target_metadata = fs::symlink_metadata(&target_path).with_context(|| {
-                format!("cannot stat dependency override target {}", target_path.display())
+                format!(
+                    "cannot stat dependency override target {}",
+                    target_path.display()
+                )
             })?;
             let variant_metadata = fs::symlink_metadata(&variant_path).with_context(|| {
-                format!("cannot stat dependency override source {}", variant_path.display())
+                format!(
+                    "cannot stat dependency override source {}",
+                    variant_path.display()
+                )
             })?;
             if !target_metadata.file_type().is_file() || !variant_metadata.file_type().is_file() {
                 bail!(
@@ -139,27 +161,25 @@ impl OciRunner {
                     variant_source.display()
                 );
             }
-            let baseline_sha256 = sha256_file(&target_path)?;
-            let variant_sha256 = sha256_file(&variant_path)?;
-            let target_metadata = fs::metadata(&target_path)
-                .with_context(|| format!("cannot read dependency target metadata {}", target_path.display()))?;
-            let target_atime = FileTime::from_last_access_time(&target_metadata);
-            let target_mtime = FileTime::from_last_modification_time(&target_metadata);
-            let variant_bytes = fs::read(&variant_path).with_context(|| {
-                format!("cannot read dependency override source {}", variant_path.display())
-            })?;
-            fs::write(&target_path, variant_bytes).with_context(|| {
+            let baseline_sha256 = sha256_file_with_context(&target_path, &self.context)?;
+            let variant_sha256 = sha256_file_with_context(&variant_path, &self.context)?;
+            let target_metadata = fs::metadata(&target_path).with_context(|| {
                 format!(
-                    "cannot apply dependency override {} -> {}",
-                    variant_source.display(),
-                    target.display()
+                    "cannot read dependency target metadata {}",
+                    target_path.display()
                 )
             })?;
+            let target_atime = FileTime::from_last_access_time(&target_metadata);
+            let target_mtime = FileTime::from_last_modification_time(&target_metadata);
+            copy_file_with_context(&variant_path, &target_path, &self.context)?;
             // fs::write truncates the existing target and therefore preserves its
             // permission bits. Restore atime/mtime so the controlled difference is
             // the declaration bytes rather than ordinary file metadata.
             set_file_times(&target_path, target_atime, target_mtime).with_context(|| {
-                format!("cannot restore dependency target timestamps {}", target_path.display())
+                format!(
+                    "cannot restore dependency target timestamps {}",
+                    target_path.display()
+                )
             })?;
             records.push(SourceOverrideRecord {
                 target: target.clone(),
@@ -180,7 +200,8 @@ impl OciRunner {
         let wrappers_dir = metadata_dir.join("toolchain-wrappers");
         let invocations_dir = metadata_dir.join("toolchain-invocations");
         fs::create_dir_all(&wrappers_dir).context("cannot create toolchain wrapper directory")?;
-        fs::create_dir_all(&invocations_dir).context("cannot create toolchain invocation directory")?;
+        fs::create_dir_all(&invocations_dir)
+            .context("cannot create toolchain invocation directory")?;
 
         let mut actuals = String::new();
         let mut runtime_bindings = BTreeMap::new();
@@ -201,7 +222,9 @@ impl OciRunner {
             {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&wrapper_path, fs::Permissions::from_mode(0o755))
-                    .with_context(|| format!("cannot mark toolchain wrapper {variable} executable"))?;
+                    .with_context(|| {
+                        format!("cannot mark toolchain wrapper {variable} executable")
+                    })?;
             }
             runtime_bindings.insert(
                 variable.clone(),
@@ -262,6 +285,20 @@ impl OciRunner {
         value
     }
 
+    fn probe_resource_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(cpus) = self.context.resources.cpus {
+            args.extend(["--cpus".into(), cpus.to_string()]);
+        }
+        if let Some(memory) = self.context.resources.memory_bytes {
+            args.extend(["--memory".into(), memory.to_string()]);
+        }
+        if let Some(pids) = self.context.resources.pids {
+            args.extend(["--pids-limit".into(), pids.to_string()]);
+        }
+        args
+    }
+
     fn probe_toolchain(&self, resolved_image_id: &str) -> ToolchainProvenance {
         const SCRIPT: &str = r#"
 for tool in cc c++ gcc g++ clang clang++ rustc cargo ld lld ar ranlib python3 python pip pip3 uv poetry node npm pnpm yarn java javac go; do
@@ -272,19 +309,44 @@ for tool in cc c++ gcc g++ clang clang++ rustc cargo ld lld ar ranlib python3 py
 done
 "#;
 
-        let output = Command::new(self.runtime_executable())
-            .args([
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--entrypoint",
-                "/bin/sh",
-                resolved_image_id,
-                "-c",
-                SCRIPT,
-            ])
-            .output();
+        let mut owned = match crate::engine::budget::OwnedContainer::new(
+            &self.context,
+            self.backend,
+            "probe",
+        ) {
+            Ok(owned) => owned,
+            Err(error) => {
+                return ToolchainProvenance {
+                    probes: Vec::new(),
+                    bindings: Vec::new(),
+                    error: Some(format!("probe cleanup capacity unavailable: {error:#}")),
+                };
+            }
+        };
+        let label = self.context.operation_label();
+        let output = self.context.output_on_spawn(
+            Command::new(self.runtime_executable())
+                .arg("run")
+                .arg("--cidfile")
+                .arg(owned.cidfile())
+                .args(self.probe_resource_args())
+                .args([
+                    "--name",
+                    owned.name(),
+                    "--label",
+                    &label,
+                    "--network",
+                    "none",
+                    "--entrypoint",
+                    "/bin/sh",
+                    resolved_image_id,
+                    "-c",
+                    SCRIPT,
+                ]),
+            || owned.launched(),
+        );
+        let cleanup = owned.cleanup();
+        let output = output.and_then(|value| cleanup.map(|()| value));
 
         let output = match output {
             Ok(output) => output,
@@ -324,14 +386,21 @@ done
             .collect::<Vec<_>>();
         probes.sort_by(|left, right| left.tool.cmp(&right.tool));
         probes.dedup_by(|left, right| left.tool == right.tool);
-        ToolchainProvenance { probes, bindings: Vec::new(), error: None }
+        ToolchainProvenance {
+            probes,
+            bindings: Vec::new(),
+            error: None,
+        }
     }
 
     fn resolve_image_uncached(&self, image: &str) -> Result<String> {
         let inspect = |image: &str| -> Result<Option<String>> {
-            let output = Command::new(self.runtime_executable())
-                .args(["image", "inspect", "--format", "{{.Id}}", image])
-                .output()
+            let output = self
+                .context
+                .output(
+                    Command::new(self.runtime_executable())
+                        .args(["image", "inspect", "--format", "{{.Id}}", image]),
+                )
                 .with_context(|| {
                     format!(
                         "failed to inspect {} image {image}",
@@ -354,9 +423,9 @@ done
             return Ok(id);
         }
 
-        let pull = Command::new(self.runtime_executable())
-            .args(["pull", image])
-            .output()
+        let pull = self
+            .context
+            .output(Command::new(self.runtime_executable()).args(["pull", image]))
             .with_context(|| {
                 format!(
                     "failed to pull {} image {image}",
@@ -390,6 +459,8 @@ done
         container_name: &str,
         command: &[String],
     ) -> Result<Vec<String>> {
+        self.context.validate_environment(environment)?;
+        self.context.check()?;
         let host_workspace = fs::canonicalize(workspace)
             .with_context(|| format!("cannot canonicalize {}", workspace.display()))?;
         let host_mount = host_workspace
@@ -413,11 +484,15 @@ done
 
         let mut args = vec![
             "run".to_string(),
-            "--rm".to_string(),
             "--name".to_string(),
             container_name.to_string(),
+            "--label".to_string(),
+            self.context.operation_label(),
             "--mount".to_string(),
-            format!("type=bind,src={host_mount},dst={}", environment.container_source_path),
+            format!(
+                "type=bind,src={host_mount},dst={}",
+                environment.container_source_path
+            ),
             "--mount".to_string(),
             format!("type=bind,src={host_metadata_mount},dst=/reprobisect-meta"),
         ];
@@ -438,14 +513,25 @@ done
             args.push(hostname.clone());
         }
 
-        if let Some(cpu_count) = environment.cpu_count {
+        if let Some(cpu_count) = self.context.resources.cpus.or(environment.cpu_count) {
             args.push("--cpus".to_string());
             args.push(cpu_count.to_string());
         }
 
-        if environment.network_mode != "default" {
-            args.push("--network".to_string());
-            args.push(environment.network_mode.clone());
+        if let Some(memory) = self.context.resources.memory_bytes {
+            args.extend(["--memory".into(), memory.to_string()]);
+        }
+        if let Some(pids) = self.context.resources.pids {
+            args.extend(["--pids-limit".into(), pids.to_string()]);
+        }
+        let network = self
+            .context
+            .resources
+            .network
+            .as_deref()
+            .unwrap_or(&environment.network_mode);
+        if network != "default" {
+            args.extend(["--network".into(), network.into()]);
         }
 
         if environment.network_trace || environment.file_input_trace {
@@ -658,12 +744,22 @@ exit "$command_status"
                 trace_status,
                 syscall_trace,
                 if environment.network_trace { "1" } else { "0" }.to_string(),
-                if environment.file_input_trace { "1" } else { "0" }.to_string(),
+                if environment.file_input_trace {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
                 dependency_status,
                 dependency_before,
                 dependency_after,
                 dependency_spec,
-                if environment.runtime_dependency_provenance { "1" } else { "0" }.to_string(),
+                if environment.runtime_dependency_provenance {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
                 environment.dependency_cache_max_files.to_string(),
                 environment.dependency_cache_max_bytes.to_string(),
                 if matches!(self.backend, RunnerBackend::Docker) && environment.umask.is_some() {
@@ -696,7 +792,10 @@ fn expand_controlled_value(value: &str, environment: &ControlledEnvironment) -> 
         .replace("{build}", &environment.container_work_path)
 }
 
-fn parse_toolchain_binding_probes(path: &Path, invocations_dir: &Path) -> Vec<ToolchainBindingProbe> {
+fn parse_toolchain_binding_probes(
+    path: &Path,
+    invocations_dir: &Path,
+) -> Vec<ToolchainBindingProbe> {
     let Ok(raw) = fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -714,12 +813,13 @@ fn parse_toolchain_binding_probes(path: &Path, invocations_dir: &Path) -> Vec<To
                 .next()
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
-            let error = resolved_path
-                .is_none()
-                .then(|| "configured executable was not resolvable inside the build container".to_string());
-            let invocation_count = fs::read_to_string(invocations_dir.join(format!("{variable}.log")))
-                .map(|raw| raw.lines().count())
-                .unwrap_or(0);
+            let error = resolved_path.is_none().then(|| {
+                "configured executable was not resolvable inside the build container".to_string()
+            });
+            let invocation_count =
+                fs::read_to_string(invocations_dir.join(format!("{variable}.log")))
+                    .map(|raw| raw.lines().count())
+                    .unwrap_or(0);
             Some(ToolchainBindingProbe {
                 variable,
                 configured_value,
@@ -844,8 +944,8 @@ fn process_child_pid(body: &str) -> Option<String> {
         "fork resumed",
         "vfork resumed",
     ]
-        .iter()
-        .any(|marker| body.contains(marker));
+    .iter()
+    .any(|marker| body.contains(marker));
     if !is_creation {
         return None;
     }
@@ -905,11 +1005,7 @@ fn fcntl_descriptor_update(body: &str) -> Option<(i64, Option<i64>, Option<bool>
         if new_fd < 0 {
             return None;
         }
-        return Some((
-            fd,
-            Some(new_fd),
-            Some(command == "F_DUPFD_CLOEXEC"),
-        ));
+        return Some((fd, Some(new_fd), Some(command == "F_DUPFD_CLOEXEC")));
     }
     None
 }
@@ -945,7 +1041,11 @@ fn read_bounded_trace(metadata_dir: &Path, max_bytes: u64) -> Result<(String, u6
         bytes.truncate(max_bytes as usize);
     }
     let parsed_bytes = bytes.len() as u64;
-    Ok((String::from_utf8_lossy(&bytes).into_owned(), parsed_bytes, truncated))
+    Ok((
+        String::from_utf8_lossy(&bytes).into_owned(),
+        parsed_bytes,
+        truncated,
+    ))
 }
 
 fn trace_pid_and_body(line: &str) -> (&str, &str) {
@@ -957,7 +1057,12 @@ fn trace_pid_and_body(line: &str) -> (&str, &str) {
         }
     }
     let digits = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
-    if digits > 0 && trimmed[digits..].chars().next().is_some_and(char::is_whitespace) {
+    if digits > 0
+        && trimmed[digits..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+    {
         return (&trimmed[..digits], trimmed[digits..].trim_start());
     }
     ("root", trimmed)
@@ -987,10 +1092,8 @@ fn process_role_from_exec(path: &str) -> &'static str {
         "cc" | "c++" | "gcc" | "g++" | "clang" | "clang++" | "rustc" => "compiler",
         "ld" | "ld.lld" | "lld" | "lld-link" => "linker",
         "ar" | "ranlib" => "archiver",
-        "cargo" | "npm" | "npx" | "pnpm" | "yarn" | "pip" | "pip3" | "uv"
-        | "poetry" | "go" | "bundle" | "bundler" | "composer" | "gradle" | "gradlew" => {
-            "package_manager"
-        }
+        "cargo" | "npm" | "npx" | "pnpm" | "yarn" | "pip" | "pip3" | "uv" | "poetry" | "go"
+        | "bundle" | "bundler" | "composer" | "gradle" | "gradlew" => "package_manager",
         "make" | "gmake" | "ninja" | "cmake" | "meson" => "build_tool",
         "tar" | "zip" | "gzip" | "xz" | "zstd" => "packager",
         "python" | "python3" | "ruby" | "perl" => "interpreter",
@@ -1084,10 +1187,14 @@ fn parse_network_trace(
             if let Some(scope) = network_endpoint_scope(body) {
                 *endpoint_scopes.entry(scope.to_string()).or_insert(0) += 1;
                 if network_syscall_succeeded(body) {
-                    *successful_endpoint_scopes.entry(scope.to_string()).or_insert(0) += 1;
+                    *successful_endpoint_scopes
+                        .entry(scope.to_string())
+                        .or_insert(0) += 1;
                     if is_nonlocal_scope(scope) {
                         let role = roles.get(pid).map(String::as_str).unwrap_or("unknown");
-                        *successful_nonlocal_by_role.entry(role.to_string()).or_insert(0) += 1;
+                        *successful_nonlocal_by_role
+                            .entry(role.to_string())
+                            .or_insert(0) += 1;
                     }
                 }
             }
@@ -1115,37 +1222,65 @@ fn parse_network_trace(
 
 fn dependency_trace_path(path: &str) -> bool {
     const NAMES: &[&str] = &[
-        "Cargo.lock", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml",
-        "yarn.lock", "bun.lock", "bun.lockb", "poetry.lock", "Pipfile.lock", "uv.lock",
-        "requirements.txt", "requirements.lock", "go.sum", "Gemfile.lock", "composer.lock",
-        "mix.lock", "gradle.lockfile",
+        "Cargo.lock",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "poetry.lock",
+        "Pipfile.lock",
+        "uv.lock",
+        "requirements.txt",
+        "requirements.lock",
+        "go.sum",
+        "Gemfile.lock",
+        "composer.lock",
+        "mix.lock",
+        "gradle.lockfile",
     ];
-    NAMES.iter().any(|name| path == *name || path.ends_with(&format!("/{name}")))
+    NAMES
+        .iter()
+        .any(|name| path == *name || path.ends_with(&format!("/{name}")))
         || path.ends_with("/vendor/modules.txt")
 }
 
 fn cache_trace_path(path: &str, environment: &ControlledEnvironment) -> bool {
     const BUILTIN: &[&str] = &[
-        "/.cargo/registry/", "/.npm/", "/.cache/pip/", "/.cache/uv/",
-        "/.cache/pypoetry/", "/go/pkg/mod/", "/.local/share/pnpm/", "/.cache/yarn/",
+        "/.cargo/registry/",
+        "/.npm/",
+        "/.cache/pip/",
+        "/.cache/uv/",
+        "/.cache/pypoetry/",
+        "/go/pkg/mod/",
+        "/.local/share/pnpm/",
+        "/.cache/yarn/",
     ];
     BUILTIN.iter().any(|fragment| path.contains(fragment))
-        || environment
-            .dependency_cache_paths
-            .values()
-            .any(|root| path == root || path.starts_with(&format!("{}/", root.trim_end_matches('/'))))
+        || environment.dependency_cache_paths.values().any(|root| {
+            path == root || path.starts_with(&format!("{}/", root.trim_end_matches('/')))
+        })
 }
 
 fn output_trace_path(path: &str, outputs: &[PathBuf], environment: &ControlledEnvironment) -> bool {
     outputs.iter().any(|output| {
         let relative = output.to_string_lossy().replace('\\', "/");
-        let full = format!("{}/{}", environment.container_work_path.trim_end_matches('/'), relative);
+        let full = format!(
+            "{}/{}",
+            environment.container_work_path.trim_end_matches('/'),
+            relative
+        );
         path == relative || path == full
     })
 }
 
 fn file_open_path(body: &str) -> Option<&str> {
-    if body.contains("open(") || body.contains("openat(") || body.contains("openat2(") || body.contains("creat(") {
+    if body.contains("open(")
+        || body.contains("openat(")
+        || body.contains("openat2(")
+        || body.contains("creat(")
+    {
         first_quoted_argument(body)
     } else {
         None
@@ -1204,11 +1339,7 @@ impl TraceActivity {
     }
 }
 
-fn is_ancestor(
-    possible_ancestor: &str,
-    process: &str,
-    parents: &BTreeMap<String, String>,
-) -> bool {
+fn is_ancestor(possible_ancestor: &str, process: &str, parents: &BTreeMap<String, String>) -> bool {
     let mut current = process;
     let mut seen = BTreeSet::new();
     while let Some(parent) = parents.get(current) {
@@ -1310,7 +1441,10 @@ fn parse_process_trace(
             }
         }
         update_process_role(body, pid, &mut roles);
-        let role = roles.get(pid).cloned().unwrap_or_else(|| "unknown".to_string());
+        let role = roles
+            .get(pid)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
 
         if let Some(child) = process_child_pid(body) {
             if let Some(parent_role) = roles.get(pid).cloned() {
@@ -1426,7 +1560,8 @@ fn parse_process_trace(
                 }
             }
 
-            if body.contains("rename(") || body.contains("renameat(") || body.contains("renameat2(") {
+            if body.contains("rename(") || body.contains("renameat(") || body.contains("renameat2(")
+            {
                 let paths = quoted_arguments(body);
                 if paths.len() >= 2 {
                     let source = paths[0];
@@ -1462,7 +1597,8 @@ fn parse_process_trace(
             }
         }
 
-        if network_enabled && (body.contains("connect(") || body.contains("sendto("))
+        if network_enabled
+            && (body.contains("connect(") || body.contains("sendto("))
             && network_syscall_succeeded(body)
         {
             if let Some(scope) = network_endpoint_scope(body) {
@@ -1689,7 +1825,9 @@ fn parse_dependency_cache_summaries(
     if status.trim() == "unavailable" {
         return (
             Vec::new(),
-            Some("dependency cache summarizer tools were unavailable in the build image".to_string()),
+            Some(
+                "dependency cache summarizer tools were unavailable in the build image".to_string(),
+            ),
         );
     }
     if status.trim() != "available" {
@@ -1779,7 +1917,13 @@ fn collect_runtime_dependency_provenance(
     let (dependency_files, dependency_resolutions, mut errors) =
         match collect_dependency_provenance(workspace) {
             Ok((files, resolutions)) => (files, resolutions, Vec::new()),
-            Err(error) => (Vec::new(), Vec::new(), vec![format!("post-build dependency provenance failed: {error:#}")]),
+            Err(error) => (
+                Vec::new(),
+                Vec::new(),
+                vec![format!(
+                    "post-build dependency provenance failed: {error:#}"
+                )],
+            ),
         };
     let (cache_summaries, cache_error) = parse_dependency_cache_summaries(metadata_dir);
     if let Some(error) = cache_error {
@@ -1795,11 +1939,18 @@ fn collect_runtime_dependency_provenance(
     }
 }
 
-fn apply_source_mtime(root: &Path, epoch: i64) -> Result<()> {
+fn apply_source_mtime(
+    root: &Path,
+    epoch: i64,
+    context: &crate::engine::budget::ExecutionContext,
+) -> Result<()> {
     let timestamp = FileTime::from_unix_time(epoch, 0);
+    context.check()?;
     for entry in WalkDir::new(root).follow_links(false).contents_first(true) {
-        let entry = entry
-            .with_context(|| format!("cannot walk {} while setting source mtimes", root.display()))?;
+        context.check()?;
+        let entry = entry.with_context(|| {
+            format!("cannot walk {} while setting source mtimes", root.display())
+        })?;
         if entry.file_type().is_symlink() {
             continue;
         }
@@ -1810,13 +1961,19 @@ fn apply_source_mtime(root: &Path, epoch: i64) -> Result<()> {
 }
 
 impl Runner for OciRunner {
+    fn execution(&self) -> &crate::engine::budget::ExecutionContext {
+        &self.context
+    }
+    fn reserve_group(&self, count: usize) -> Result<Self> {
+        let mut child = self.clone();
+        child.context = self.context.complete_group(count as u64)?;
+        Ok(child)
+    }
     fn available(&self) -> Result<()> {
         let runtime = self.runtime_executable();
-        let output = Command::new(runtime)
-            .arg("version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
+        let output = self
+            .context
+            .output(Command::new(runtime).arg("version"))
             .with_context(|| {
                 format!(
                     "{} is required but the `{runtime}` executable was not found",
@@ -1842,10 +1999,9 @@ impl Runner for OciRunner {
         ordinal: usize,
         environment: &ControlledEnvironment,
     ) -> Result<RunOutcome> {
-        let requested_image = environment
-            .image_override
-            .as_deref()
-            .unwrap_or(&spec.image);
+        self.context.validate_environment(environment)?;
+        self.context.dispatch_build()?;
+        let requested_image = environment.image_override.as_deref().unwrap_or(&spec.image);
         let resolved_image_id = self.ensure_image(requested_image)?;
         let mut toolchain_provenance = self.toolchain_provenance(&resolved_image_id);
         let workspace = self.prepare_workspace(environment)?;
@@ -1858,20 +2014,19 @@ impl Runner for OciRunner {
         self.prepare_dependency_cache_spec(metadata_dir.path(), environment)?;
         let source_overrides = self.apply_source_overrides(workspace.path(), environment)?;
         if let Some(epoch) = environment.source_mtime_epoch {
-            apply_source_mtime(workspace.path(), epoch)?;
+            apply_source_mtime(workspace.path(), epoch, &self.context)?;
         }
         let run_id = Uuid::new_v4();
-        let container_name = format!("reprobisect-{}", run_id.simple());
+        let mut owned =
+            crate::engine::budget::OwnedContainer::new(&self.context, self.backend, "build")?;
+        let container_name = owned.name().to_string();
         let mut runtime_environment = spec.environment.clone();
         runtime_environment.extend(environment.environment.clone());
         for (key, value) in &runtime_toolchain_bindings {
             runtime_environment.insert(key.clone(), value.clone());
         }
         if let Some(cpu_count) = environment.cpu_count {
-            runtime_environment.insert(
-                "REPROBISECT_CPU_COUNT".to_string(),
-                cpu_count.to_string(),
-            );
+            runtime_environment.insert("REPROBISECT_CPU_COUNT".to_string(), cpu_count.to_string());
         }
 
         let mut recorded_environment: BTreeMap<String, String> = spec
@@ -1884,14 +2039,11 @@ impl Runner for OciRunner {
             recorded_environment.insert(key.clone(), expand_controlled_value(value, environment));
         }
         if let Some(cpu_count) = environment.cpu_count {
-            recorded_environment.insert(
-                "REPROBISECT_CPU_COUNT".to_string(),
-                cpu_count.to_string(),
-            );
+            recorded_environment.insert("REPROBISECT_CPU_COUNT".to_string(), cpu_count.to_string());
         }
 
         let expanded_command = expand_command(&spec.command, environment);
-        let args = self.runtime_args(
+        let mut args = self.runtime_args(
             spec,
             workspace.path(),
             metadata_dir.path(),
@@ -1902,6 +2054,14 @@ impl Runner for OciRunner {
             &expanded_command,
         )?;
 
+        args.splice(
+            1..1,
+            [
+                "--cidfile".to_string(),
+                owned.cidfile().to_string_lossy().into_owned(),
+            ],
+        );
+        self.context.check()?;
         let started = Instant::now();
         let mut child = Command::new(self.runtime_executable())
             .args(&args)
@@ -1914,6 +2074,7 @@ impl Runner for OciRunner {
                     self.backend.display_name()
                 )
             })?;
+        owned.launched();
         let stdout_pipe = child
             .stdout
             .take()
@@ -1922,63 +2083,39 @@ impl Runner for OciRunner {
             .stderr
             .take()
             .context("OCI runtime stderr pipe was not available")?;
-        let log_limit = spec.log_capture_max_bytes;
-        let stdout_reader = thread::spawn(move || drain_bounded_stream(stdout_pipe, log_limit));
-        let stderr_reader = thread::spawn(move || drain_bounded_stream(stderr_pipe, log_limit));
-
-        let finished = Arc::new(AtomicBool::new(false));
-        let watchdog_finished = Arc::clone(&finished);
-        let watchdog_name = container_name.clone();
-        let watchdog_runtime = self.runtime_executable().to_string();
-        let timeout = Duration::from_secs(spec.timeout_seconds);
-        let watchdog = thread::spawn(move || {
-            let start = Instant::now();
-            while start.elapsed() < timeout {
-                if watchdog_finished.load(Ordering::Relaxed) {
-                    return false;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-
-            if !watchdog_finished.swap(true, Ordering::Relaxed) {
-                let _ = Command::new(&watchdog_runtime)
-                    .arg("kill")
-                    .arg(&watchdog_name)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-                true
-            } else {
-                false
-            }
-        });
-
-        let status_result = child.wait();
-        finished.store(true, Ordering::Relaxed);
-        let timed_out = watchdog
-            .join()
-            .map_err(|_| anyhow::anyhow!("build timeout watchdog panicked"))?;
-        let stdout_capture = stdout_reader
-            .join()
-            .map_err(|_| anyhow::anyhow!("stdout capture thread panicked"))?
-            .context("failed while draining build stdout")?;
-        let stderr_capture = stderr_reader
-            .join()
-            .map_err(|_| anyhow::anyhow!("stderr capture thread panicked"))?
-            .context("failed while draining build stderr")?;
-        let status = status_result.with_context(|| {
-            format!(
-                "failed waiting for {} build run {ordinal}",
-                self.backend.display_name()
-            )
-        })?;
-
-        if timed_out {
-            bail!(
-                "build run {ordinal} exceeded timeout of {} seconds",
-                spec.timeout_seconds
-            );
+        let stdout_live =
+            crate::engine::budget::LiveCapture::start(stdout_pipe, spec.log_capture_max_bytes);
+        let stderr_live =
+            crate::engine::budget::LiveCapture::start(stderr_pipe, spec.log_capture_max_bytes);
+        let status_result = self
+            .context
+            .wait_child(&mut child, Duration::from_secs(spec.timeout_seconds));
+        let cleanup_result = owned.cleanup();
+        let stdout_capture = stdout_live.snapshot();
+        let stderr_capture = stderr_live.snapshot();
+        let completion = self.context.check();
+        if status_result.is_err()
+            || cleanup_result.is_err()
+            || completion.is_err()
+            || !stdout_capture.complete
+            || !stderr_capture.complete
+        {
+            self.context.stop("operational_error");
+            self.context.persist_partial_attempt(&self.project_root, serde_json::json!({
+                "purpose": "build", "experiment_id": experiment_id, "run_id": run_id, "ordinal": ordinal,
+                "source_digest": source_digest, "runner_backend": self.backend,
+                "stdout": stdout_capture, "stderr": stderr_capture,
+                "exit_status": status_result.as_ref().ok().and_then(|s| s.code()),
+                "cleanup_verified": cleanup_result.is_ok(),
+                "artifacts": crate::engine::budget::interrupted_artifacts(workspace.path(), &spec.outputs),
+                "qualification": "interrupted_attempt_not_a_completed_build_run",
+            }))?;
+            status_result?;
+            cleanup_result?;
+            completion?;
+            bail!("build output pipes did not close completely");
         }
+        let status = status_result?;
 
         let exit_code = status.code().unwrap_or(128);
         let stdout = stdout_capture.text;
@@ -2035,12 +2172,12 @@ impl Runner for OciRunner {
                 log_capture_max_bytes: spec.log_capture_max_bytes,
                 stdout,
                 stderr,
-                stdout_sha256: stdout_capture.sha256,
-                stderr_sha256: stderr_capture.sha256,
-                stdout_bytes: stdout_capture.total_bytes,
-                stderr_bytes: stderr_capture.total_bytes,
-                stdout_truncated: stdout_capture.truncated,
-                stderr_truncated: stderr_capture.truncated,
+                stdout_sha256: stdout_capture.observed_sha256,
+                stderr_sha256: stderr_capture.observed_sha256,
+                stdout_bytes: stdout_capture.observed_bytes,
+                stderr_bytes: stderr_capture.observed_bytes,
+                stdout_truncated: stdout_capture.retained_truncated,
+                stderr_truncated: stderr_capture.retained_truncated,
             }));
         }
 
@@ -2069,17 +2206,16 @@ impl Runner for OciRunner {
             log_capture_max_bytes: spec.log_capture_max_bytes,
             stdout,
             stderr,
-            stdout_sha256: stdout_capture.sha256,
-            stderr_sha256: stderr_capture.sha256,
-            stdout_bytes: stdout_capture.total_bytes,
-            stderr_bytes: stderr_capture.total_bytes,
-            stdout_truncated: stdout_capture.truncated,
-            stderr_truncated: stderr_capture.truncated,
+            stdout_sha256: stdout_capture.observed_sha256,
+            stderr_sha256: stderr_capture.observed_sha256,
+            stdout_bytes: stdout_capture.observed_bytes,
+            stderr_bytes: stderr_capture.observed_bytes,
+            stdout_truncated: stdout_capture.retained_truncated,
+            stderr_truncated: stderr_capture.retained_truncated,
             artifacts,
         }))
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2116,7 +2252,12 @@ mod tests {
             ..ControlledEnvironment::default()
         };
         let expanded = expand_command(
-            &["cc".into(), "{source}/main.c".into(), "-o".into(), "{build}/app".into()],
+            &[
+                "cc".into(),
+                "{source}/main.c".into(),
+                "-o".into(),
+                "{build}/app".into(),
+            ],
             &environment,
         );
         assert_eq!(expanded[1], "/src-alt/main.c");
@@ -2128,10 +2269,52 @@ mod tests {
     }
 
     #[test]
+    fn image_probe_deadline_is_bounded() {
+        let project = tempfile::tempdir().unwrap();
+        let context =
+            crate::engine::budget::ExecutionContext::new(&crate::config::ExecutionConfig {
+                total_timeout_seconds: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        let runner = OciRunner::new(
+            project.path().to_path_buf(),
+            RunnerBackend::Docker,
+            context.clone(),
+        );
+        assert!(
+            runner
+                .resolve_image_uncached("never-pull-this:local")
+                .is_err()
+        );
+        assert_eq!(
+            context.reason(),
+            Some("deadline_exhausted"),
+            "image inspect must use the operation deadline before launching"
+        );
+    }
+
+    #[test]
     fn selects_configured_oci_runtime() {
         let project = tempfile::tempdir().unwrap();
-        let docker = OciRunner::new(project.path().to_path_buf(), RunnerBackend::Docker);
-        let podman = OciRunner::new(project.path().to_path_buf(), RunnerBackend::Podman);
+        let docker =
+            OciRunner::new(
+                project.path().to_path_buf(),
+                RunnerBackend::Docker,
+                crate::engine::budget::ExecutionContext::new(
+                    &crate::config::ExecutionConfig::default(),
+                )
+                .unwrap(),
+            );
+        let podman =
+            OciRunner::new(
+                project.path().to_path_buf(),
+                RunnerBackend::Podman,
+                crate::engine::budget::ExecutionContext::new(
+                    &crate::config::ExecutionConfig::default(),
+                )
+                .unwrap(),
+            );
         assert_eq!(docker.runtime_executable(), "docker");
         assert_eq!(podman.runtime_executable(), "podman");
     }
@@ -2144,26 +2327,248 @@ mod tests {
         let fixed = FileTime::from_unix_time(946_684_800, 0);
         set_file_times(project.path().join("requirements.txt"), fixed, fixed).unwrap();
 
-        let runner = OciRunner::new(project.path().to_path_buf(), RunnerBackend::Docker);
-        let workspace = runner.prepare_workspace(&ControlledEnvironment::default()).unwrap();
+        let runner =
+            OciRunner::new(
+                project.path().to_path_buf(),
+                RunnerBackend::Docker,
+                crate::engine::budget::ExecutionContext::new(
+                    &crate::config::ExecutionConfig::default(),
+                )
+                .unwrap(),
+            );
+        let workspace = runner
+            .prepare_workspace(&ControlledEnvironment::default())
+            .unwrap();
         let before = fs::metadata(workspace.path().join("requirements.txt")).unwrap();
         let mut environment = ControlledEnvironment::default();
         environment.source_file_overrides.insert(
             PathBuf::from("requirements.txt"),
             PathBuf::from("requirements.variant.txt"),
         );
-        let records = runner.apply_source_overrides(workspace.path(), &environment).unwrap();
+        let records = runner
+            .apply_source_overrides(workspace.path(), &environment)
+            .unwrap();
         let after = fs::metadata(workspace.path().join("requirements.txt")).unwrap();
 
-        assert_eq!(fs::read_to_string(workspace.path().join("requirements.txt")).unwrap(), "demo==2\n");
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("requirements.txt")).unwrap(),
+            "demo==2\n"
+        );
         assert_ne!(records[0].baseline_sha256, records[0].variant_sha256);
-        assert_eq!(before.permissions().readonly(), after.permissions().readonly());
+        assert_eq!(
+            before.permissions().readonly(),
+            after.permissions().readonly()
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(before.permissions().mode(), after.permissions().mode());
         }
-        assert_eq!(FileTime::from_last_modification_time(&before), FileTime::from_last_modification_time(&after));
+        assert_eq!(
+            FileTime::from_last_modification_time(&before),
+            FileTime::from_last_modification_time(&after)
+        );
+    }
+
+    #[test]
+    fn toolchain_probe_obeys_fixed_resource_limits() {
+        let project = tempfile::tempdir().unwrap();
+        let context =
+            crate::engine::budget::ExecutionContext::new(&crate::config::ExecutionConfig {
+                resources: crate::config::ResourcePolicy {
+                    restricted: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let runner = OciRunner::new(project.path().to_path_buf(), RunnerBackend::Docker, context);
+        let args = runner.probe_resource_args();
+        for (flag, value) in [
+            ("--cpus", "2"),
+            ("--memory", "1073741824"),
+            ("--pids-limit", "256"),
+        ] {
+            assert!(
+                args.windows(2).any(|p| p[0] == flag && p[1] == value),
+                "missing probe {flag}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_context_refuses_final_build_arguments() {
+        let workspace = tempfile::tempdir().unwrap();
+        let metadata = tempfile::tempdir().unwrap();
+        let context =
+            crate::engine::budget::ExecutionContext::new(&crate::config::ExecutionConfig {
+                total_timeout_seconds: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        let runner = OciRunner::new(
+            workspace.path().to_path_buf(),
+            RunnerBackend::Docker,
+            context,
+        );
+        let spec = BuildSpec {
+            image: "unused".into(),
+            command: vec!["true".into()],
+            outputs: vec!["out".into()],
+            environment: BTreeMap::new(),
+            working_directory: ".".into(),
+            timeout_seconds: 60,
+            log_capture_max_bytes: 1024,
+        };
+        assert!(
+            runner
+                .runtime_args(
+                    &spec,
+                    workspace.path(),
+                    metadata.path(),
+                    &Default::default(),
+                    &BTreeMap::new(),
+                    "sha256:demo",
+                    "owned",
+                    &spec.command
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn child_api_cannot_bypass_restricted_trace_policy() {
+        let project = tempfile::tempdir().unwrap();
+        let context =
+            crate::engine::budget::ExecutionContext::new(&crate::config::ExecutionConfig {
+                resources: crate::config::ResourcePolicy {
+                    restricted: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let runner = OciRunner::new(project.path().to_path_buf(), RunnerBackend::Docker, context);
+        let spec = BuildSpec {
+            image: "unused".into(),
+            command: vec!["true".into()],
+            outputs: vec!["out".into()],
+            environment: BTreeMap::new(),
+            working_directory: ".".into(),
+            timeout_seconds: 60,
+            log_capture_max_bytes: 1024,
+        };
+        let environment = ControlledEnvironment {
+            file_input_trace: true,
+            ..Default::default()
+        };
+        let error = runner
+            .run_attempt(&spec, Uuid::nil(), "source", 1, &environment)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("restricted"),
+            "must reject trace privilege escalation before image probes: {error:#}"
+        );
+    }
+
+    #[test]
+    fn owned_build_arguments_carry_operation_identity() {
+        let project = tempfile::tempdir().unwrap();
+        let metadata = tempfile::tempdir().unwrap();
+        let runner =
+            OciRunner::new(
+                project.path().to_path_buf(),
+                RunnerBackend::Docker,
+                crate::engine::budget::ExecutionContext::new(
+                    &crate::config::ExecutionConfig::default(),
+                )
+                .unwrap(),
+            );
+        let spec = BuildSpec {
+            image: "unused".into(),
+            command: vec!["true".into()],
+            outputs: vec!["out".into()],
+            environment: BTreeMap::new(),
+            working_directory: ".".into(),
+            timeout_seconds: 60,
+            log_capture_max_bytes: 1024,
+        };
+        let args = runner
+            .runtime_args(
+                &spec,
+                project.path(),
+                metadata.path(),
+                &ControlledEnvironment::default(),
+                &BTreeMap::new(),
+                "sha256:demo",
+                "owned-test",
+                &spec.command,
+            )
+            .unwrap();
+        assert!(
+            args.windows(2)
+                .any(|p| p[0] == "--label" && p[1].starts_with("reprobisect.operation=")),
+            "every owned build needs an operation identity: {args:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_resource_policy_is_identical_for_both_arms() {
+        let project = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let metadata = tempfile::tempdir().unwrap();
+        let config = crate::config::ExecutionConfig {
+            resources: crate::config::ResourcePolicy {
+                cpus: Some(2),
+                memory_bytes: Some(1_073_741_824),
+                pids: Some(256),
+                network: Some("none".into()),
+                restricted: false,
+            },
+            ..Default::default()
+        };
+        let runner = OciRunner::new(
+            project.path().to_path_buf(),
+            RunnerBackend::Docker,
+            crate::engine::budget::ExecutionContext::new(&config).unwrap(),
+        );
+        let spec = BuildSpec {
+            image: "unused".into(),
+            command: vec!["true".into()],
+            outputs: vec!["out".into()],
+            environment: BTreeMap::new(),
+            working_directory: ".".into(),
+            timeout_seconds: 60,
+            log_capture_max_bytes: 1024,
+        };
+        for timezone in ["UTC", "Pacific/Honolulu"] {
+            let mut environment = ControlledEnvironment::default();
+            environment.environment.insert("TZ".into(), timezone.into());
+            let args = runner
+                .runtime_args(
+                    &spec,
+                    workspace.path(),
+                    metadata.path(),
+                    &environment,
+                    &environment.environment,
+                    "sha256:demo",
+                    "owned-test",
+                    &spec.command,
+                )
+                .unwrap();
+            for (flag, value) in [
+                ("--cpus", "2"),
+                ("--memory", "1073741824"),
+                ("--pids-limit", "256"),
+                ("--network", "none"),
+            ] {
+                assert!(
+                    args.windows(2).any(|p| p[0] == flag && p[1] == value),
+                    "missing {flag} {value}: {args:?}"
+                );
+                assert_eq!(args.iter().filter(|a| a.as_str() == flag).count(), 1);
+            }
+        }
     }
 
     #[test]
@@ -2171,7 +2576,15 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let metadata = tempfile::tempdir().unwrap();
-        let runner = OciRunner::new(project.path().to_path_buf(), RunnerBackend::Docker);
+        let runner =
+            OciRunner::new(
+                project.path().to_path_buf(),
+                RunnerBackend::Docker,
+                crate::engine::budget::ExecutionContext::new(
+                    &crate::config::ExecutionConfig::default(),
+                )
+                .unwrap(),
+            );
         let spec = BuildSpec {
             image: "debian:bookworm".into(),
             command: vec!["true".into()],
@@ -2197,7 +2610,11 @@ mod tests {
                 &command,
             )
             .unwrap();
-        assert!(!args.windows(2).any(|pair| pair[0] == "--cap-add" && pair[1] == "SYS_PTRACE"));
+        assert!(
+            !args
+                .windows(2)
+                .any(|pair| pair[0] == "--cap-add" && pair[1] == "SYS_PTRACE")
+        );
 
         let traced = ControlledEnvironment {
             file_input_trace: true,
@@ -2215,7 +2632,10 @@ mod tests {
                 &command,
             )
             .unwrap();
-        assert!(args.windows(2).any(|pair| pair[0] == "--cap-add" && pair[1] == "SYS_PTRACE"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--cap-add" && pair[1] == "SYS_PTRACE")
+        );
     }
 
     #[test]
@@ -2223,7 +2643,15 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let metadata = tempfile::tempdir().unwrap();
-        let runner = OciRunner::new(project.path().to_path_buf(), RunnerBackend::Docker);
+        let runner =
+            OciRunner::new(
+                project.path().to_path_buf(),
+                RunnerBackend::Docker,
+                crate::engine::budget::ExecutionContext::new(
+                    &crate::config::ExecutionConfig::default(),
+                )
+                .unwrap(),
+            );
         let spec = BuildSpec {
             image: "debian:bookworm".into(),
             command: vec!["true".into()],
@@ -2252,7 +2680,10 @@ mod tests {
             .unwrap();
         let owner = host_owner(workspace.path()).unwrap();
         assert!(args.iter().any(|arg| arg == &owner));
-        assert!(args.iter().any(|arg| arg == &environment.container_source_path));
+        assert!(
+            args.iter()
+                .any(|arg| arg == &environment.container_source_path)
+        );
         assert!(args.iter().any(|arg| arg.contains("chown -R")));
     }
 
@@ -2273,7 +2704,10 @@ mod tests {
         assert_eq!(summary.failed_connects, 0);
         assert_eq!(summary.sendto_calls, 1);
         assert_eq!(summary.recvfrom_calls, 1);
-        assert_eq!(summary.address_families, vec!["AF_INET".to_string(), "AF_INET6".to_string()]);
+        assert_eq!(
+            summary.address_families,
+            vec!["AF_INET".to_string(), "AF_INET6".to_string()]
+        );
         assert_eq!(summary.endpoint_scopes.get("public"), Some(&1));
         assert_eq!(summary.endpoint_scopes.get("loopback"), Some(&1));
         assert_eq!(summary.successful_endpoint_scopes.get("public"), Some(&1));
@@ -2401,14 +2835,22 @@ mod tests {
             .iter()
             .find(|process| process.parent_process.is_some())
             .unwrap();
-        assert_eq!(child.parent_process.as_deref(), Some(parent.process.as_str()));
+        assert_eq!(
+            child.parent_process.as_deref(),
+            Some(parent.process.as_str())
+        );
         assert_eq!(child.lineage_depth, 1);
         assert_eq!(child.role, "interpreter");
         assert_eq!(child.dependency_mmaps, 1);
         assert_eq!(child.output_writes, 1);
         assert_eq!(summary.ancestor_dependency_output, 1);
         assert_eq!(summary.same_process_dependency_output, 1);
-        assert!(summary.processes.iter().all(|process| process.process.starts_with('p')));
+        assert!(
+            summary
+                .processes
+                .iter()
+                .all(|process| process.process.starts_with('p'))
+        );
     }
 
     #[test]
@@ -2574,14 +3016,20 @@ mod tests {
 
         let (summaries, error) = parse_dependency_cache_summaries(temp.path());
         assert!(error.is_none());
-        let cargo = summaries.iter().find(|item| item.ecosystem == "cargo").unwrap();
+        let cargo = summaries
+            .iter()
+            .find(|item| item.ecosystem == "cargo")
+            .unwrap();
         assert_eq!(cargo.before_file_count, 2);
         assert_eq!(cargo.after_file_count, 3);
         assert!(cargo.changed_during_build);
         assert!(cargo.comparison_complete);
         assert!(!cargo.before_truncated);
         assert!(!cargo.after_truncated);
-        let demo = summaries.iter().find(|item| item.ecosystem == "demo").unwrap();
+        let demo = summaries
+            .iter()
+            .find(|item| item.ecosystem == "demo")
+            .unwrap();
         assert_eq!(demo.before_file_count, 0);
         assert_eq!(demo.after_file_count, 1);
         assert!(demo.before_aggregate_sha256.is_none());

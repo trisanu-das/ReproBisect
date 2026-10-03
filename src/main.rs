@@ -22,6 +22,7 @@ use cli::{Cli, Command};
 const EXIT_ERROR: i32 = 5;
 
 fn run(cli: Cli) -> Result<()> {
+    engine::budget::install_signal_handler()?;
     match cli.command {
         Command::Init(args) => cli::run_init(args),
         Command::Doctor(args) => cli::run_doctor(args),

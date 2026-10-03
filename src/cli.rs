@@ -262,7 +262,11 @@ pub fn run_doctor(args: DoctorArgs) -> Result<()> {
         io::stdout()
             .flush()
             .context("cannot flush doctor report output")?;
-        std::process::exit(EXIT_DIAGNOSTIC);
+        let interrupted = report_data
+            .checks
+            .iter()
+            .any(|c| c.name == "execution completion");
+        std::process::exit(if interrupted { 5 } else { EXIT_DIAGNOSTIC });
     }
 
     Ok(())
@@ -314,11 +318,15 @@ pub fn run_check(args: CheckArgs, operation: &'static str) -> Result<()> {
         OutputFormat::Json => report::print_json(&report_data)?,
     }
 
-    let code = match report_data.status {
-        crate::model::CheckStatus::Reproducible => 0,
-        crate::model::CheckStatus::NonReproducible
-        | crate::model::CheckStatus::UncontrolledNondeterminism
-        | crate::model::CheckStatus::Inconclusive => EXIT_DIAGNOSTIC,
+    let code = if crate::engine::budget::completion_reason(&report_data.notes).is_some() {
+        5
+    } else {
+        match report_data.status {
+            crate::model::CheckStatus::Reproducible => 0,
+            crate::model::CheckStatus::NonReproducible
+            | crate::model::CheckStatus::UncontrolledNondeterminism
+            | crate::model::CheckStatus::Inconclusive => EXIT_DIAGNOSTIC,
+        }
     };
 
     if code != 0 {
@@ -365,10 +373,14 @@ pub fn run_compare(args: CompareArgs) -> Result<()> {
         OutputFormat::Json => report::print_compare_json(&report_data)?,
     }
 
-    let code = match report_data.status {
-        crate::model::EnvironmentComparisonStatus::Equivalent => 0,
-        crate::model::EnvironmentComparisonStatus::Minimized
-        | crate::model::EnvironmentComparisonStatus::Inconclusive => EXIT_DIAGNOSTIC,
+    let code = if crate::engine::budget::completion_reason(&report_data.notes).is_some() {
+        5
+    } else {
+        match report_data.status {
+            crate::model::EnvironmentComparisonStatus::Equivalent => 0,
+            crate::model::EnvironmentComparisonStatus::Minimized
+            | crate::model::EnvironmentComparisonStatus::Inconclusive => EXIT_DIAGNOSTIC,
+        }
     };
     if code != 0 {
         io::stdout()
@@ -414,6 +426,14 @@ pub fn run_fix(args: FixArgs) -> Result<()> {
         OutputFormat::Json => report::print_fix_json(&fix_report)?,
     }
 
+    if crate::engine::budget::completion_reason(&fix_report.notes).is_some()
+        || crate::engine::budget::completion_reason(&fix_report.diagnosis.notes).is_some()
+    {
+        io::stdout()
+            .flush()
+            .context("cannot flush partial fix output")?;
+        std::process::exit(5);
+    }
     let success = if fix_report.diagnosis.status == crate::model::CheckStatus::Reproducible {
         true
     } else if args.verify {

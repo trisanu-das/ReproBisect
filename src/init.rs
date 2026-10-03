@@ -110,7 +110,11 @@ pub fn create_config(
                 println!(
                     "output probe observed {} changed/new file{}",
                     result.changed_file_count,
-                    if result.changed_file_count == 1 { "" } else { "s" }
+                    if result.changed_file_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
                 );
                 if result.candidates.is_empty() {
                     println!("possible final artifacts detected: none");
@@ -147,6 +151,13 @@ pub fn create_config(
                             .into(),
                     );
                 }
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<crate::output_discovery::DiscoveryInterrupted>()
+                    .is_some() =>
+            {
+                return Err(error);
             }
             Err(error) => {
                 println!("output discovery warning: {error:#}");
@@ -239,7 +250,13 @@ fn detected_kinds(project: &Path) -> Vec<ProjectKind> {
     }
     if any(
         project,
-        &["MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel", "BUILD", "BUILD.bazel"],
+        &[
+            "MODULE.bazel",
+            "WORKSPACE",
+            "WORKSPACE.bazel",
+            "BUILD",
+            "BUILD.bazel",
+        ],
     ) {
         kinds.push(ProjectKind::Bazel);
     }
@@ -280,8 +297,7 @@ fn plan_for(project: &Path, kind: ProjectKind) -> InitPlan {
 }
 
 fn cargo_plan(project: &Path) -> InitPlan {
-    let value = read(project, "Cargo.toml")
-        .and_then(|text| text.parse::<TomlValue>().ok());
+    let value = read(project, "Cargo.toml").and_then(|text| text.parse::<TomlValue>().ok());
     let name = value
         .as_ref()
         .and_then(cargo_binary_name)
@@ -369,7 +385,10 @@ fn go_plan(project: &Path) -> InitPlan {
                 "mkdir -p build && go build -trimpath -o build/reprobisect-app .".into(),
             ],
             outputs: vec![PathBuf::from("build/reprobisect-app")],
-            notes: vec!["root package appears executable; go build is directed to a stable artifact path".into()],
+            notes: vec![
+                "root package appears executable; go build is directed to a stable artifact path"
+                    .into(),
+            ],
         }
     } else {
         InitPlan {
@@ -403,7 +422,11 @@ fn node_plan(project: &Path, pnpm: bool) -> InitPlan {
         "npm install"
     };
     let build = if has_build {
-        if pnpm { " && pnpm run build" } else { " && npm run build" }
+        if pnpm {
+            " && pnpm run build"
+        } else {
+            " && npm run build"
+        }
     } else {
         ""
     };
@@ -417,7 +440,11 @@ fn node_plan(project: &Path, pnpm: bool) -> InitPlan {
     );
 
     InitPlan {
-        detected_project: if pnpm { "Node.js / pnpm".into() } else { "Node.js / npm".into() },
+        detected_project: if pnpm {
+            "Node.js / pnpm".into()
+        } else {
+            "Node.js / npm".into()
+        },
         confidence: DetectionConfidence::High,
         image: "node:22".into(),
         command: vec!["sh".into(), "-lc".into(), shell],
@@ -466,8 +493,12 @@ fn gradle_plan(project: &Path) -> InitPlan {
 }
 
 fn bazel_plan(project: &Path) -> InitPlan {
-    let build = read(project, "BUILD.bazel").or_else(|| read(project, "BUILD")).unwrap_or_default();
-    let target = bazel_binary(&build).map(|value| clean_name(&value)).filter(|name| !name.is_empty());
+    let build = read(project, "BUILD.bazel")
+        .or_else(|| read(project, "BUILD"))
+        .unwrap_or_default();
+    let target = bazel_binary(&build)
+        .map(|value| clean_name(&value))
+        .filter(|name| !name.is_empty());
     let (command, output, confidence) = if let Some(target) = target {
         (
             vec!["bazel".into(), "build".into(), format!("//:{target}")],
@@ -487,7 +518,10 @@ fn bazel_plan(project: &Path) -> InitPlan {
         image: "gcr.io/bazel-public/bazel:8.0.0".into(),
         command,
         outputs: vec![PathBuf::from(output)],
-        notes: vec!["review the selected target/output for non-root targets and multi-target workspaces".into()],
+        notes: vec![
+            "review the selected target/output for non-root targets and multi-target workspaces"
+                .into(),
+        ],
     }
 }
 
@@ -554,7 +588,10 @@ fn autotools_plan(project: &Path) -> InitPlan {
         image: "gcc:14".into(),
         command: vec!["sh".into(), "-lc".into(), configure.into()],
         outputs: vec![PathBuf::from(output)],
-        notes: vec!["verify the selected image contains the Autotools utilities required by the project".into()],
+        notes: vec![
+            "verify the selected image contains the Autotools utilities required by the project"
+                .into(),
+        ],
     }
 }
 
@@ -578,7 +615,9 @@ fn make_plan(project: &Path) -> InitPlan {
         .or_else(|| read(project, "Makefile"))
         .or_else(|| read(project, "makefile"))
         .unwrap_or_default();
-    let target = make_target(&text).map(|value| clean_name(&value)).filter(|name| !name.is_empty());
+    let target = make_target(&text)
+        .map(|value| clean_name(&value))
+        .filter(|name| !name.is_empty());
     let (output, confidence) = target
         .map(|target| (target, DetectionConfidence::Medium))
         .unwrap_or_else(|| ("build/app".into(), DetectionConfidence::Low));
@@ -588,7 +627,10 @@ fn make_plan(project: &Path) -> InitPlan {
         image: "gcc:14".into(),
         command: vec!["sh".into(), "-lc".into(), "make -j1".into()],
         outputs: vec![PathBuf::from(output)],
-        notes: vec!["Makefiles can produce several artifacts; review the inferred build.outputs value".into()],
+        notes: vec![
+            "Makefiles can produce several artifacts; review the inferred build.outputs value"
+                .into(),
+        ],
     }
 }
 
@@ -738,7 +780,13 @@ fn quoted_call_arg(text: &str, function: &str) -> Option<String> {
 }
 
 fn bazel_binary(text: &str) -> Option<String> {
-    for rule in ["cc_binary", "rust_binary", "go_binary", "py_binary", "java_binary"] {
+    for rule in [
+        "cc_binary",
+        "rust_binary",
+        "go_binary",
+        "py_binary",
+        "java_binary",
+    ] {
         let needle = format!("{rule}(");
         let Some(start) = text.find(&needle) else {
             continue;
@@ -812,7 +860,10 @@ fn plausible_target(value: &str) -> bool {
         && !value.contains('$')
         && !value.contains('=')
         && !value.contains(' ')
-        && !matches!(value, "all" | "clean" | "install" | "test" | "check" | "help")
+        && !matches!(
+            value,
+            "all" | "clean" | "install" | "test" | "check" | "help"
+        )
 }
 
 fn string_value(value: &str) -> String {
@@ -867,8 +918,14 @@ mod tests {
         assert_eq!(plan.detected_project, "Cargo");
         assert_eq!(plan.confidence, DetectionConfidence::High);
         assert_eq!(plan.image, "rust:1.86");
-        assert_eq!(plan.command, vec!["cargo", "build", "--release", "--locked"]);
-        assert_eq!(plan.outputs, vec![PathBuf::from("target/release/widget-cli")]);
+        assert_eq!(
+            plan.command,
+            vec!["cargo", "build", "--release", "--locked"]
+        );
+        assert_eq!(
+            plan.outputs,
+            vec![PathBuf::from("target/release/widget-cli")]
+        );
     }
 
     #[test]
@@ -895,13 +952,19 @@ mod tests {
             r#"{"name":"demo","version":"1.0.0","scripts":{"build":"tsc"}}"#,
         )
         .expect("write package.json");
-        fs::write(dir.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
-            .expect("write lock");
+        fs::write(
+            dir.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .expect("write lock");
 
         let plan = detect_project(dir.path());
 
         assert_eq!(plan.detected_project, "Node.js / pnpm");
-        assert_eq!(plan.outputs, vec![PathBuf::from("build/reprobisect-package.tgz")]);
+        assert_eq!(
+            plan.outputs,
+            vec![PathBuf::from("build/reprobisect-package.tgz")]
+        );
         assert!(plan.command[2].contains("pnpm run build"));
     }
 
@@ -919,7 +982,11 @@ mod tests {
 
         assert_eq!(plan.detected_project, "Cargo");
         assert_eq!(plan.confidence, DetectionConfidence::Medium);
-        assert!(plan.notes.iter().any(|note| note.contains("multiple build-system markers")));
+        assert!(
+            plan.notes
+                .iter()
+                .any(|note| note.contains("multiple build-system markers"))
+        );
     }
 
     #[test]

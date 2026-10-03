@@ -24,7 +24,7 @@ use crate::{
     },
     runner::{RunOutcome, Runner, configured_runner},
     schema::CHECK_REPORT_SCHEMA_CURRENT,
-    source::{collect_source_provenance, digest_tree},
+    source::{collect_source_provenance, digest_tree_with_context},
 };
 
 #[derive(Debug, Clone)]
@@ -43,10 +43,53 @@ pub fn check_project(
     config: &Config,
     options: &CheckOptions,
 ) -> Result<CheckReport> {
+    let context = super::budget::ExecutionContext::new(&config.execution)?;
+    let result = check_project_with_context(project_root, config, options, &context);
+    context.finish(project_root, result)
+}
+
+pub(super) fn check_project_with_context(
+    project_root: &Path,
+    config: &Config,
+    options: &CheckOptions,
+    context: &super::budget::ExecutionContext,
+) -> Result<CheckReport> {
     let experiment_id = Uuid::new_v4();
-    let source_digest = digest_tree(project_root).context("failed to digest source tree")?;
-    let source_provenance = collect_source_provenance(project_root)
-        .context("failed to collect source/dependency provenance")?;
+    let mut source_digest = String::new();
+    let preparation = (|| {
+        context.check()?;
+        source_digest = digest_tree_with_context(project_root, context)
+            .context("failed to digest source tree")?;
+        collect_source_provenance(project_root, context)
+            .context("failed to collect source/dependency provenance")
+    })();
+    let source_provenance = match preparation {
+        Ok(provenance) => provenance,
+        Err(error) if context.reason().is_some() => {
+            let report = CheckReport {
+                schema_version: CHECK_REPORT_SCHEMA_CURRENT,
+                experiment_id,
+                status: CheckStatus::Inconclusive,
+                source_digest,
+                source_provenance: Default::default(),
+                baseline_environment: baseline_environment(config),
+                runs: Vec::new(),
+                artifact_comparisons: Vec::new(),
+                interventions: Vec::new(),
+                interaction_search: None,
+                diagnoses: Vec::new(),
+                notes: vec![
+                    format!("execution_completion={}", context.reason().unwrap()),
+                    format!("preparation incomplete: {error:#}"),
+                    "an empty source_digest means source identity was not observed, not a hash"
+                        .into(),
+                ],
+            };
+            persist_report(project_root, &report)?;
+            return Ok(report);
+        }
+        Err(error) => return Err(error),
+    };
     let spec = BuildSpec {
         image: config.build.image.clone(),
         command: config.build.command.clone(),
@@ -57,15 +100,44 @@ pub fn check_project(
         log_capture_max_bytes: config.build.log_capture_max_bytes,
     };
 
-    let runner = configured_runner(project_root, config.build.runner);
-    runner.available()?;
+    let runner = configured_runner(project_root, config.build.runner, context.clone());
 
     let baseline = baseline_environment(config);
     let mut runs = Vec::with_capacity(options.control_runs);
     let mut ordinal = 1_usize;
 
     for _ in 0..options.control_runs {
-        let run = runner.run(&spec, experiment_id, &source_digest, ordinal, &baseline)?;
+        let attempt = (|| {
+            if ordinal == 1 {
+                runner.available()?;
+            }
+            runner.run(&spec, experiment_id, &source_digest, ordinal, &baseline)
+        })();
+        let run = match attempt {
+            Ok(run) => run,
+            Err(error) if context.reason().is_some() => {
+                let report = CheckReport {
+                    schema_version: CHECK_REPORT_SCHEMA_CURRENT,
+                    experiment_id,
+                    status: CheckStatus::Inconclusive,
+                    source_digest,
+                    source_provenance,
+                    baseline_environment: baseline,
+                    artifact_comparisons: compare_runs(&runs),
+                    runs,
+                    interventions: Vec::new(),
+                    interaction_search: None,
+                    diagnoses: Vec::new(),
+                    notes: vec![
+                        format!("execution_completion={}", context.reason().unwrap()),
+                        format!("baseline incomplete: {error:#}"),
+                    ],
+                };
+                persist_report(project_root, &report)?;
+                return Ok(report);
+            }
+            Err(error) => return Err(error),
+        };
         persist_run(project_root, &run)?;
         runs.push(run);
         ordinal += 1;
@@ -105,6 +177,9 @@ pub fn check_project(
     let planned = plan_interventions(config, &baseline);
     let mut intervention_results = Vec::with_capacity(planned.len());
     for intervention in &planned {
+        if context.check().is_err() {
+            break;
+        }
         intervention_results.push(execute_intervention(
             project_root,
             &runner,
@@ -187,7 +262,9 @@ pub fn check_project(
         .filter(|result| result.error.is_some())
         .count();
 
-    let status = if late_baseline_instability {
+    let status = if context.reason().is_some() && !any_changed {
+        CheckStatus::Inconclusive
+    } else if late_baseline_instability {
         CheckStatus::UncontrolledNondeterminism
     } else {
         classify_status(
@@ -264,6 +341,15 @@ pub fn check_project(
         }
     }
 
+    let _ = context.check();
+    if let Some(reason) = context.reason() {
+        notes.push(format!("execution_completion={reason}"));
+    }
+    let status = if status == CheckStatus::Reproducible && context.reason().is_some() {
+        CheckStatus::Inconclusive
+    } else {
+        status
+    };
     let report = CheckReport {
         schema_version: CHECK_REPORT_SCHEMA_CURRENT,
         experiment_id,
@@ -320,6 +406,35 @@ fn execute_intervention<R: Runner>(
     };
     let mut build_failures = Vec::new();
     let mut error = None;
+    // Reserve repetitions, matched references, and the required reversal as
+    // one indivisible promotion group. No arm may start on a partial allowance.
+    let trials = if planned.intervention.kind == InterventionKind::CpuCount {
+        2 * run_count
+    } else {
+        run_count
+    };
+    let group = runner.reserve_group(trials + options.confirmation_runs);
+    let runner = match group {
+        Ok(ref group) => group,
+        Err(error) => {
+            return Ok(InterventionResult {
+                intervention: planned.intervention,
+                runs: Vec::new(),
+                reference_runs: Vec::new(),
+                build_failures: Vec::new(),
+                artifact_deltas: Vec::new(),
+                changed: false,
+                variant_stable: None,
+                distinct_variant_outcomes: 0,
+                stochastic_effect: None,
+                reverted_to_baseline: None,
+                confirmation_run: None,
+                error: Some(format!(
+                    "complete confirmation group unavailable: {error:#}"
+                )),
+            });
+        }
+    };
 
     if planned.intervention.kind == InterventionKind::CpuCount {
         // Interleave a baseline reference immediately before every CPU variant
@@ -615,9 +730,11 @@ fn execute_interaction_search<R: Runner>(
         .iter()
         .map(|candidate| candidate.intervention.variable.clone())
         .collect::<Vec<_>>();
+    let confirmation_runner =
+        runner.reserve_group(options.interaction_runs + options.confirmation_runs)?;
     let final_runs = run_interaction_subset(
         project_root,
-        runner,
+        &confirmation_runner,
         spec,
         experiment_id,
         source_digest,
@@ -635,7 +752,7 @@ fn execute_interaction_search<R: Runner>(
     let mut confirmation_run = None;
     let mut reverted_to_baseline = None;
     if final_changed && final_stable && options.confirmation_runs == 1 {
-        let run = runner.run(
+        let run = confirmation_runner.run(
             spec,
             experiment_id,
             source_digest,
@@ -951,6 +1068,200 @@ fn marker_variable_matches(intervention: &Intervention, variable: &str) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reversal_deadline_keeps_completed_variants_without_causal_promotion() {
+        #[derive(Clone)]
+        struct DeadlineRunner(super::super::budget::ExecutionContext);
+        impl Runner for DeadlineRunner {
+            fn execution(&self) -> &super::super::budget::ExecutionContext {
+                &self.0
+            }
+            fn available(&self) -> Result<()> {
+                self.0.check()
+            }
+            fn reserve_group(&self, count: usize) -> Result<Self> {
+                Ok(Self(self.0.complete_group(count as u64)?))
+            }
+            fn run_attempt(
+                &self,
+                _spec: &BuildSpec,
+                _id: Uuid,
+                _digest: &str,
+                ordinal: usize,
+                _environment: &crate::model::ControlledEnvironment,
+            ) -> Result<RunOutcome> {
+                self.0.dispatch_build()?;
+                if ordinal == 3 {
+                    self.0
+                        .output(std::process::Command::new(std::env::current_exe()?).args([
+                            "--exact",
+                            "doctor::tests::infrastructure_hang_fixture",
+                            "--ignored",
+                        ]))?;
+                }
+                let mut run: BuildRun = serde_json::from_str(include_str!(
+                    "../../tests/evidence/phase18-build-run-v10.json"
+                ))?;
+                run.run_id = Uuid::new_v4();
+                run.ordinal = ordinal;
+                run.artifacts[0].sha256 = "changed".into();
+                Ok(RunOutcome::Success(run))
+            }
+        }
+        let project = tempfile::tempdir().unwrap();
+        let config: Config = toml::from_str("[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\n[execution]\ntotal_timeout_seconds=1\n").unwrap();
+        let context = super::super::budget::ExecutionContext::new(&config.execution).unwrap();
+        let baseline = baseline_environment(&config);
+        let planned = plan_interventions(&config, &baseline)
+            .into_iter()
+            .next()
+            .unwrap();
+        let baseline_run: BuildRun = serde_json::from_str(include_str!(
+            "../../tests/evidence/phase18-build-run-v10.json"
+        ))
+        .unwrap();
+        let spec = BuildSpec {
+            image: "unused".into(),
+            command: vec!["true".into()],
+            outputs: vec!["out".into()],
+            environment: Default::default(),
+            working_directory: ".".into(),
+            timeout_seconds: 60,
+            log_capture_max_bytes: 1024,
+        };
+        let options = CheckOptions {
+            control_runs: 2,
+            intervention_runs: 2,
+            confirmation_runs: 1,
+            stochastic_runs: 5,
+            stochastic_alpha: 0.05,
+            interaction_runs: 2,
+            max_interaction_variables: 8,
+        };
+        let result = execute_intervention(
+            project.path(),
+            &DeadlineRunner(context.clone()),
+            &spec,
+            Uuid::new_v4(),
+            "source",
+            &baseline_run,
+            &baseline,
+            planned,
+            &options,
+            &mut 1,
+        )
+        .unwrap();
+        assert_eq!(context.reason(), Some("deadline_exhausted"));
+        assert_eq!(result.runs.len(), 2);
+        assert!(result.confirmation_run.is_none());
+        assert!(result.reverted_to_baseline.is_none());
+        assert!(
+            result
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("deadline_exhausted")
+        );
+        let diagnoses = synthesize_diagnoses(std::slice::from_ref(&result), None);
+        assert_eq!(diagnoses.len(), 1);
+        assert_eq!(diagnoses[0].confidence, crate::model::Confidence::Low);
+        let status = classify_status(
+            result.changed,
+            false,
+            usize::from(result.error.is_some()),
+            false,
+        );
+        assert_eq!(
+            status,
+            CheckStatus::NonReproducible,
+            "observed changed bytes remain a finding, not confirmed attribution"
+        );
+        let report = CheckReport {
+            schema_version: CHECK_REPORT_SCHEMA_CURRENT,
+            experiment_id: Uuid::new_v4(),
+            status,
+            source_digest: baseline_run.source_digest.clone(),
+            source_provenance: Default::default(),
+            baseline_environment: baseline,
+            runs: vec![baseline_run.clone(); options.control_runs],
+            artifact_comparisons: Vec::new(),
+            interventions: vec![result],
+            interaction_search: None,
+            diagnoses,
+            notes: vec!["execution_completion=deadline_exhausted".into()],
+        };
+        persist_report(project.path(), &report).unwrap();
+        for policy in [
+            crate::ci::CiPolicy::ReportOnly,
+            crate::ci::CiPolicy::RequireReproducible,
+        ] {
+            let envelope =
+                crate::ci::from_report(project.path(), &report, &config, &options, policy).unwrap();
+            let value = serde_json::to_value(envelope).unwrap();
+            assert_eq!(value["diagnostic_status"], "non_reproducible");
+            assert_eq!(value["completion"]["completed"], false);
+            assert_eq!(value["coverage"]["complete"], false);
+            assert_eq!(value["policy"]["passed"], false);
+            assert_eq!(value["policy"]["exit_code"], 5);
+        }
+    }
+
+    #[test]
+    fn single_dimension_reserves_repetitions_and_reversal_before_any_launch() {
+        let project = tempfile::tempdir().unwrap();
+        let config: Config = toml::from_str("[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\n[execution]\nmax_dispatches=10\n").unwrap();
+        let context = super::super::budget::ExecutionContext::new(&config.execution).unwrap();
+        let runner = configured_runner(
+            project.path(),
+            crate::model::RunnerBackend::Docker,
+            context.clone(),
+        );
+        let baseline = baseline_environment(&config);
+        let planned = plan_interventions(&config, &baseline)
+            .into_iter()
+            .next()
+            .unwrap();
+        let baseline_run: BuildRun = serde_json::from_str(include_str!(
+            "../../tests/evidence/phase18-build-run-v10.json"
+        ))
+        .unwrap();
+        let spec = BuildSpec {
+            image: "unused".into(),
+            command: vec!["true".into()],
+            outputs: vec!["out".into()],
+            environment: Default::default(),
+            working_directory: ".".into(),
+            timeout_seconds: 60,
+            log_capture_max_bytes: 1024,
+        };
+        let options = CheckOptions {
+            control_runs: 2,
+            intervention_runs: 2,
+            confirmation_runs: 1,
+            stochastic_runs: 5,
+            stochastic_alpha: 0.05,
+            interaction_runs: 2,
+            max_interaction_variables: 8,
+        };
+        let result = execute_intervention(
+            project.path(),
+            &runner,
+            &spec,
+            Uuid::new_v4(),
+            "source",
+            &baseline_run,
+            &baseline,
+            planned,
+            &options,
+            &mut 1,
+        )
+        .unwrap();
+        assert_eq!(context.reason(), Some("budget_exhausted"));
+        assert!(result.runs.is_empty());
+        assert!(result.confirmation_run.is_none());
+        assert!(result.error.unwrap().contains("group"));
+    }
 
     #[test]
     fn network_failure_without_variant_artifact_is_inconclusive() {

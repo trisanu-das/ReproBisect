@@ -16,6 +16,10 @@ pub enum RunOutcome {
 }
 
 pub trait Runner {
+    fn execution(&self) -> &crate::engine::budget::ExecutionContext;
+    fn reserve_group(&self, count: usize) -> Result<Self>
+    where
+        Self: Sized;
     /// Execute one build attempt. A non-zero build-command exit is returned as
     /// structured evidence; runner/infrastructure failures remain `Err`.
     fn run_attempt(
@@ -54,6 +58,10 @@ pub trait Runner {
     fn available(&self) -> Result<()>;
 }
 
-pub fn configured_runner(project_root: &Path, backend: RunnerBackend) -> OciRunner {
-    OciRunner::new(project_root.to_path_buf(), backend)
+pub fn configured_runner(
+    project_root: &Path,
+    backend: RunnerBackend,
+    context: crate::engine::budget::ExecutionContext,
+) -> OciRunner {
+    OciRunner::new(project_root.to_path_buf(), backend, context)
 }
