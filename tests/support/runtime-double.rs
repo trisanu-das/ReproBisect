@@ -16,7 +16,18 @@ fn main() {
         .append(true)
         .open(root.join("runtime.log"))
         .unwrap();
-    writeln!(log, "{}", a.join(" | ")).unwrap();
+    let arguments = a.join(" | ");
+    if mode == "podman-stop-grace" {
+        // This regression counts dispatches, not lines in the probe's shell script.
+        writeln!(
+            log,
+            "{}",
+            arguments.replace('\n', "\\n").replace('\r', "\\r")
+        )
+        .unwrap();
+    } else {
+        writeln!(log, "{arguments}").unwrap();
+    }
     let flag = |key: &str| {
         a.iter()
             .position(|v| v == key)
@@ -30,6 +41,12 @@ fn main() {
             if mode == "failed-probe-spawn" {
                 let executable = env::current_exe().unwrap();
                 fs::rename(&executable, root.join("retired-runtime.exe")).unwrap();
+                // EACCES searches later PATH entries; ENOEXEC may spawn a shell.
+                // A self-referential symlink instead makes POSIX exec fail with
+                // ELOOP, which stops PATH search even when real Docker is later.
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&executable, &executable).unwrap();
+                #[cfg(not(unix))]
                 fs::write(&executable, b"not an executable").unwrap();
             }
             println!("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -158,6 +175,25 @@ fn main() {
             assert_eq!(id.len(), 64, "destructive target must be exact ID");
             if mode == "cleanupfail" {
                 std::process::exit(1);
+            }
+            if mode == "podman-stop-grace" {
+                let executable = env::current_exe().unwrap();
+                let podman = executable.file_stem().unwrap() == "podman";
+                if !podman && a.iter().any(|v| v == "--time") {
+                    eprintln!("Docker rm does not support Podman's --time");
+                    std::process::exit(125);
+                }
+                let active_build = fs::read_to_string(root.join(id))
+                    .unwrap()
+                    .lines()
+                    .nth(1)
+                    .is_some_and(|name| name.starts_with("reprobisect-build-"));
+                if podman && active_build && flag("--time") != "0" {
+                    // Model Podman 4.9.3's default stop grace exceeding the
+                    // private three-second cleanup deadline, not native OCI.
+                    fs::write(root.join("default-stop-grace"), id).unwrap();
+                    thread::sleep(Duration::from_secs(10));
+                }
             }
             let _ = fs::remove_file(root.join(id));
             let _ = fs::remove_file(root.join("late-owned-container"));

@@ -76,6 +76,22 @@ fn execution_receipt(project: &std::path::Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
+fn execution_failure_details(
+    phase: &str,
+    receipt: &serde_json::Value,
+    output: &std::process::Output,
+) -> String {
+    let bounded =
+        |bytes: &[u8]| String::from_utf8_lossy(&bytes[..bytes.len().min(8192)]).into_owned();
+    format!(
+        "phase={phase}; receipt={}; exit={:?}; stdout={}; stderr={}",
+        bounded(receipt.to_string().as_bytes()),
+        output.status.code(),
+        bounded(&output.stdout),
+        bounded(&output.stderr)
+    )
+}
+
 #[test]
 fn public_successful_build_parent_with_open_pipes_is_operational_error() {
     for route in ["check", "diagnose"] {
@@ -179,23 +195,22 @@ fn public_probe_predispatch_refusal_is_known_not_dispatched() {
 fn public_probe_failed_spawn_is_known_not_dispatched_and_stops_work() {
     let project = tempfile::tempdir().unwrap();
     let runtime = tempfile::tempdir().unwrap();
-    std::fs::copy(
-        runtime_double().join(format!("docker{}", std::env::consts::EXE_SUFFIX)),
-        runtime
-            .path()
-            .join(format!("docker{}", std::env::consts::EXE_SUFFIX)),
+    let fallback = tempfile::tempdir().unwrap();
+    let executable = format!("docker{}", std::env::consts::EXE_SUFFIX);
+    for dir in [runtime.path(), fallback.path()] {
+        std::fs::copy(runtime_double().join(&executable), dir.join(&executable)).unwrap();
+    }
+    // A later executable makes PATH fallthrough observable even without system Docker.
+    // Keep inherited PATH (and Git provenance) so this still charges exactly eight.
+    let path = std::env::join_paths(
+        [runtime.path().to_path_buf(), fallback.path().to_path_buf()]
+            .into_iter()
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
     std::fs::write(project.path().join(".reprobisect.toml"), "[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\n[execution]\ntotal_timeout_seconds=30\n").unwrap();
     let output = double_command(project.path(), "failed-probe-spawn")
-        .env(
-            "PATH",
-            std::env::join_paths(
-                std::iter::once(runtime.path().to_path_buf())
-                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-            )
-            .unwrap(),
-        )
+        .env("PATH", &path)
         .args(["check", "--ci", "--ci-policy", "report-only"])
         .arg(project.path())
         .output()
@@ -206,28 +221,55 @@ fn public_probe_failed_spawn_is_known_not_dispatched_and_stops_work() {
     );
     let receipt = execution_receipt(project.path());
     let log = std::fs::read_to_string(project.path().join("runtime.log")).unwrap();
-    assert_eq!(log.lines().count(), 2, "only info and image inspect: {log}");
+    let details = execution_failure_details("failed-spawn", &receipt, &output);
+    assert_eq!(
+        log.lines().count(),
+        2,
+        "only info and image inspect: {log}; {details}"
+    );
     let owned = receipt["owned_containers"].as_array().unwrap();
-    assert_eq!(owned[0]["creation_outcome"], "not_dispatched", "{receipt}");
-    assert_eq!(owned[0]["cleanup_verified"], true);
+    assert_eq!(owned[0]["creation_outcome"], "not_dispatched", "{details}");
+    assert_eq!(owned[0]["cleanup_verified"], true, "{details}");
     assert_eq!(
         owned.len(),
         1,
-        "no additional reservations after infrastructure spawn failed"
+        "no additional reservations after infrastructure spawn failed; {details}"
     );
     assert_eq!(
         receipt["charged_dispatches"], 8,
-        "git provenance + version + build + image + 3 cleanup + failed spawn remain charged, no refunds"
+        "git provenance + version + build + image + 3 cleanup + failed spawn remain charged, no refunds; {details}"
     );
-    assert_eq!(receipt["completion_reason"], "operational_error");
+    assert_eq!(
+        receipt["completion_reason"], "operational_error",
+        "{details}"
+    );
     assert!(
         receipt["elapsed_millis"].as_u64().unwrap() < 2500,
-        "no CID reconciliation for failed spawn: {receipt}"
+        "no CID reconciliation for failed spawn; {details}"
     );
-    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(output.status.code(), Some(5), "{details}");
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(envelope["completion"]["reason"], "operational_error");
     assert_eq!(envelope["policy"]["passed"], false);
+    let error = Command::new("docker")
+        .env("PATH", &path)
+        .env("PROBE_ROOT", project.path())
+        .env("PROBE_MODE", "failed-probe-spawn")
+        .arg("version")
+        .spawn()
+        .expect_err("fixture must fail at OS spawn, not run a later runtime or shell");
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        error.raw_os_error(),
+        Some(40),
+        "ELOOP, not PATH-search EACCES/ENOEXEC: {error}"
+    );
+    #[cfg(not(target_os = "linux"))]
+    let _ = error;
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("runtime.log")).unwrap(),
+        log
+    );
 }
 
 #[test]
@@ -282,6 +324,129 @@ fn public_toolchain_probe_open_streams_cannot_report_success() {
                 assert!(report["runs"].as_array().unwrap().is_empty());
             }
         }
+    }
+}
+
+#[test]
+fn public_podman_interrupted_cleanup_is_exact_and_bounded() {
+    for backend in ["podman", "docker"] {
+        let project = tempfile::tempdir().unwrap();
+        let config = format!(
+            "[build]\nrunner='{backend}'\nimage='unused'\ncommand=['true']\noutputs=['out']\ntimeout_seconds=1\n[execution]\ntotal_timeout_seconds=30\n"
+        );
+        std::fs::write(project.path().join(".reprobisect.toml"), &config).unwrap();
+        let unrelated_id = "b".repeat(64);
+        std::fs::write(project.path().join(&unrelated_id), b"unrelated\nother").unwrap();
+        let output = double_command(project.path(), "podman-stop-grace")
+            .args(["check", "--ci", "--ci-policy", "report-only"])
+            .arg(project.path())
+            .output()
+            .unwrap();
+        let receipt = execution_receipt(project.path());
+        let details = execution_failure_details(backend, &receipt, &output);
+        assert_eq!(output.status.code(), Some(5), "{details}");
+        assert_eq!(receipt["completion_reason"], "attempt_timeout", "{details}");
+        assert_eq!(receipt["completed"], false, "{details}");
+        assert_eq!(
+            receipt["charged_dispatches"], 11,
+            "no extra cleanup commands or refunds; {details}"
+        );
+        let owned = receipt["owned_containers"].as_array().unwrap();
+        assert_eq!(
+            owned.len(),
+            2,
+            "one probe and one interrupted build; {details}"
+        );
+        assert!(
+            owned.iter().all(|c| c["cleanup_verified"] == true),
+            "{details}"
+        );
+        assert_eq!(owned[0]["purpose"], "probe", "{details}");
+        assert_eq!(owned[1]["purpose"], "build", "{details}");
+        let log = std::fs::read_to_string(project.path().join("runtime.log")).unwrap();
+        let lines: Vec<_> = log.lines().collect();
+        assert_eq!(
+            lines.len(),
+            10,
+            "only cold preparation, probe and build with three cleanup calls each: {log}; {details}"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("run | ")).count(),
+            2,
+            "{log}"
+        );
+        for container in owned {
+            assert_eq!(container["creation_outcome"], "acknowledged", "{details}");
+            let id = container["container_id"].as_str().unwrap();
+            assert_eq!(id.len(), 64, "{details}");
+            let inspect = format!("container | inspect | --format | {{{{json .}}}} | -- | {id}");
+            let remove = if backend == "podman" {
+                format!("rm | --force | --time | 0 | -- | {id}")
+            } else {
+                format!("rm | --force | -- | {id}")
+            };
+            let absent =
+                format!("ps | --all | --no-trunc | --filter | id={id} | --format | {{{{.ID}}}}");
+            let index = lines.iter().position(|l| l == &inspect).unwrap();
+            assert_eq!(lines[index + 1], remove, "{log}; {details}");
+            assert_eq!(lines[index + 2], absent, "{log}; {details}");
+            assert!(!project.path().join(id).exists(), "{details}");
+        }
+        assert!(
+            !project.path().join("default-stop-grace").exists(),
+            "{details}"
+        );
+        assert_eq!(
+            std::fs::read(project.path().join(&unrelated_id)).unwrap(),
+            b"unrelated\nother"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(".reprobisect.toml")).unwrap(),
+            config
+        );
+        let attempts = receipt["partial_attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 1, "{details}");
+        let attempt: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(project.path().join(attempts[0].as_str().unwrap())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            attempt["runner_backend"], backend,
+            "actual public backend; {details}"
+        );
+        assert_eq!(attempt["cleanup_verified"], true, "{details}");
+        assert_eq!(attempt["completed"], false);
+        assert!(
+            attempt["stdout"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("actual stdout before interrupt")
+        );
+        assert!(
+            attempt["artifacts"]["observations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["logical_path"] == "out"
+                    && v["retained_bytes_hex"] == hex::encode(b"actual interrupted artifact"))
+        );
+        assert!(!project.path().join("out").exists());
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelope["completion"]["reason"], "operational_error");
+        assert_eq!(envelope["completion"]["completed"], false);
+        assert_eq!(envelope["coverage"]["complete"], false);
+        assert_eq!(envelope["policy"]["passed"], false);
+        let report: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                project
+                    .path()
+                    .join(envelope["report"]["path"].as_str().unwrap()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["status"], "inconclusive");
+        assert!(report["runs"].as_array().unwrap().is_empty());
     }
 }
 
@@ -1226,7 +1391,9 @@ total_timeout_seconds = {}
             );
         }
         let output = bounded_wait(child);
-        assert_eq!(output.status.code(), Some(5), "{output:?}");
+        let phase_name = format!("{runtime}/{phase}");
+        let details = execution_failure_details(&phase_name, &serde_json::Value::Null, &output);
+        assert_eq!(output.status.code(), Some(5), "{details}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["completion"]["reason"], "operational_error");
         assert_eq!(value["completion"]["completed"], false);
@@ -1256,6 +1423,7 @@ total_timeout_seconds = {}
         assert_eq!(receipts.len(), 1);
         let receipt: serde_json::Value =
             serde_json::from_slice(&std::fs::read(receipts[0].path()).unwrap()).unwrap();
+        let details = execution_failure_details(&phase_name, &receipt, &output);
         if let Some((id, operation)) = cancelled_identity {
             assert_eq!(receipt["operation_id"], operation);
             assert!(
@@ -1284,15 +1452,19 @@ total_timeout_seconds = {}
                 .any(|v| v["logical_path"] == "out"
                     && v["retained_bytes_hex"] == hex::encode(b"interrupted-artifact"))
         );
-        assert_eq!(receipt["completion_reason"], phase);
-        assert_eq!(receipt["completed"], false);
-        assert!(receipt["charged_dispatches"].as_u64().unwrap() > 0);
+        assert_eq!(receipt["completion_reason"], phase, "{details}");
+        assert_eq!(receipt["completed"], false, "{details}");
+        assert!(
+            receipt["charged_dispatches"].as_u64().unwrap() > 0,
+            "{details}"
+        );
         assert!(
             receipt["owned_containers"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|c| c["cleanup_verified"] == true)
+                .all(|c| c["cleanup_verified"] == true),
+            "{details}"
         );
         let label = format!(
             "label=reprobisect.operation={}",

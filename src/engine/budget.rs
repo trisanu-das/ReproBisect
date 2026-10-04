@@ -617,9 +617,14 @@ impl OwnedContainer {
                         == Some(&operation),
                 "owned ID/operation identity mismatch"
             );
-            let removed = cleanup.output(
-                std::process::Command::new(self.runtime).args(["rm", "--force", "--", &id]),
-            )?;
+            let mut remove = std::process::Command::new(self.runtime);
+            remove.args(["rm", "--force"]);
+            if self.runtime == "podman" {
+                // Podman force-rm otherwise waits its container stop timeout
+                // (normally 10s), exceeding our private 3s safety grace.
+                remove.args(["--time", "0"]);
+            }
+            let removed = cleanup.output(remove.args(["--", &id]))?;
             anyhow::ensure!(removed.status.success(), "exact owned ID removal failed");
             let absent = cleanup.output(std::process::Command::new(self.runtime).args([
                 "ps",
