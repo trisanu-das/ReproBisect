@@ -17,7 +17,7 @@ fn main() {
         .open(root.join("runtime.log"))
         .unwrap();
     let arguments = a.join(" | ");
-    if mode == "podman-stop-grace" {
+    if mode == "podman-stop-grace" || mode == "failed-build-spawn" {
         // This regression counts dispatches, not lines in the probe's shell script.
         writeln!(
             log,
@@ -92,6 +92,17 @@ fn main() {
                 return;
             }
             fs::write(root.join("build-name"), &name).unwrap();
+            if matches!(
+                mode.as_str(),
+                "failed-build-spawn" | "fix-verify-stable" | "fix-verify-timeout"
+            ) {
+                let count = fs::read_to_string(root.join("build-count"))
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0)
+                    + 1;
+                fs::write(root.join("build-count"), count.to_string()).unwrap();
+            }
             let mount = flag("--mount");
             let volume = flag("--volume");
             let src = mount
@@ -100,11 +111,27 @@ fn main() {
                 .map(str::to_string)
                 .or_else(|| volume.strip_suffix(":/workspace").map(str::to_string));
             if let Some(src) = src {
-                fs::write(
-                    PathBuf::from(src).join("out"),
-                    b"actual interrupted artifact",
-                )
-                .unwrap();
+                let workspace = PathBuf::from(src);
+                let fix = mode.starts_with("fix-verify-");
+                let count = if fix {
+                    fs::read_to_string(root.join("build-count"))
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let bytes = if fix && (count == 3 || count == 4) {
+                    b"changed diagnosis artifact".as_slice()
+                } else {
+                    b"actual interrupted artifact".as_slice()
+                };
+                fs::write(workspace.join("out"), bytes).unwrap();
+                if fix && count >= 6 {
+                    let patched_makefile = fs::read_to_string(workspace.join("Makefile")).unwrap();
+                    assert!(patched_makefile.contains("# ReproBisect candidate:"));
+                    fs::write(root.join("patched-makefile-observed"), patched_makefile).unwrap();
+                }
             }
             println!("actual stdout before interrupt");
             std::io::stdout().flush().unwrap();
@@ -130,7 +157,20 @@ fn main() {
                     .unwrap();
                 return;
             }
-            if mode == "stable" || mode == "cleanupfail" || mode == "probe-open-pipes" {
+            if mode == "fix-verify-timeout"
+                && fs::read_to_string(root.join("build-count")).ok().as_deref() == Some("6")
+            {
+                thread::sleep(Duration::from_secs(10));
+            }
+            if matches!(
+                mode.as_str(),
+                "stable"
+                    | "cleanupfail"
+                    | "probe-open-pipes"
+                    | "failed-build-spawn"
+                    | "fix-verify-stable"
+                    | "fix-verify-timeout"
+            ) {
                 return;
             }
             if mode == "pipes" {
@@ -203,6 +243,22 @@ fn main() {
             let id = flag("--filter").replace("id=", "");
             if root.join(&id).is_file() {
                 println!("{id}");
+            }
+            if mode == "failed-build-spawn"
+                && fs::read_to_string(root.join("build-count")).ok().as_deref() == Some("2")
+            {
+                let executable = env::current_exe().unwrap();
+                fs::rename(&executable, root.join("retired-postbaseline-runtime.exe")).unwrap();
+                // Fatal ELOOP forbids PATH fallback or a shell on POSIX.
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&executable, &executable).unwrap();
+                #[cfg(not(unix))]
+                fs::write(&executable, b"invalid native executable").unwrap();
+                fs::write(
+                    root.join("postbaseline-spawn-armed"),
+                    "two baselines cleaned",
+                )
+                .unwrap();
             }
         }
         _ => {}

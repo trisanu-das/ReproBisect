@@ -1308,7 +1308,8 @@ fn verify_plan_inner(
         verification_root,
         verification_config.build.runner,
         context.clone(),
-    );
+    )
+    .with_evidence_root(project_root);
     runner.available()?;
     let runner = runner.reserve_group(2 * VERIFICATION_RUNS)?;
     let experiment_id = Uuid::new_v4();

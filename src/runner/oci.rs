@@ -95,6 +95,7 @@ fn drain_bounded_stream<R: Read>(mut reader: R, max_bytes: u64) -> std::io::Resu
 pub struct OciRunner {
     context: crate::engine::budget::ExecutionContext,
     project_root: PathBuf,
+    evidence_root: PathBuf,
     backend: RunnerBackend,
     resolved_image_ids: Arc<Mutex<BTreeMap<String, String>>>,
     toolchain_cache: Arc<Mutex<BTreeMap<String, ToolchainProvenance>>>,
@@ -108,11 +109,18 @@ impl OciRunner {
     ) -> Self {
         Self {
             context,
+            evidence_root: project_root.clone(),
             project_root,
             backend,
             resolved_image_ids: Arc::new(Mutex::new(BTreeMap::new())),
             toolchain_cache: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    /// Retain attempt sidecars outside a temporary verification source tree.
+    pub fn with_evidence_root(mut self, evidence_root: &Path) -> Self {
+        self.evidence_root = evidence_root.to_path_buf();
+        self
     }
 
     fn runtime_executable(&self) -> &'static str {
@@ -2068,6 +2076,7 @@ impl Runner for OciRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
+            .inspect_err(|_| self.context.stop("operational_error"))
             .with_context(|| {
                 format!(
                     "failed to start {} build run {ordinal}",
@@ -2101,7 +2110,7 @@ impl Runner for OciRunner {
             || !stderr_capture.complete
         {
             self.context.stop("operational_error");
-            self.context.persist_partial_attempt(&self.project_root, serde_json::json!({
+            self.context.persist_partial_attempt(&self.evidence_root, serde_json::json!({
                 "purpose": "build", "experiment_id": experiment_id, "run_id": run_id, "ordinal": ordinal,
                 "source_digest": source_digest, "runner_backend": self.backend,
                 "stdout": stdout_capture, "stderr": stderr_capture,

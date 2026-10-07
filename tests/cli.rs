@@ -1647,3 +1647,390 @@ fn ci_config_error_is_not_non_reproducible() {
         assert!(!project.path().join(".reprobisect").exists());
     }
 }
+
+#[test]
+fn public_postbaseline_build_spawn_failure_stops_scheduling() {
+    for route in ["check", "diagnose"] {
+        for policy in [Some("report-only"), Some("require-reproducible"), None] {
+            let project = tempfile::tempdir().unwrap();
+            let runtime = tempfile::tempdir().unwrap();
+            let fallback = tempfile::tempdir().unwrap();
+            let executable = format!("docker{}", std::env::consts::EXE_SUFFIX);
+            for dir in [runtime.path(), fallback.path()] {
+                std::fs::copy(runtime_double().join(&executable), dir.join(&executable)).unwrap();
+            }
+            let path = std::env::join_paths(
+                [runtime.path().to_path_buf(), fallback.path().to_path_buf()]
+                    .into_iter()
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            std::fs::write(
+                project.path().join(".reprobisect.toml"),
+                r#"
+[build]
+image='unused'
+command=['true']
+outputs=['out']
+timeout_seconds=1
+[experiments]
+control_runs=2
+intervention_runs=2
+confirmation_runs=1
+stochastic_runs=4
+interaction_runs=2
+[experiments.environment_variables]
+POSTBASELINE_DIMENSION=['A','B']
+[experiments.dimensions]
+network_access=false
+source_path=false
+build_path=false
+source_date_epoch=false
+timezone=false
+locale=false
+hostname=true
+source_mtime=false
+cpu_count=false
+umask=false
+directory_order=false
+[execution]
+max_dispatches=4096
+total_timeout_seconds=60
+"#,
+            )
+            .unwrap();
+            let mut command = double_command(project.path(), "failed-build-spawn");
+            command.env("PATH", &path).arg(route);
+            if let Some(policy) = policy {
+                command.args(["--ci", "--ci-policy", policy]);
+            } else {
+                command.args(["--format", "json"]);
+            }
+            let output = command.arg(project.path()).output().unwrap();
+            let receipt = execution_receipt(project.path());
+            let details = execution_failure_details("postbaseline-build-spawn", &receipt, &output);
+            assert!(
+                project.path().join("postbaseline-spawn-armed").is_file(),
+                "{details}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(project.path().join("build-count")).unwrap(),
+                "2",
+                "{details}"
+            );
+            let log = std::fs::read_to_string(project.path().join("runtime.log")).unwrap();
+            assert_eq!(
+                log.lines()
+                    .filter(|line| line.starts_with("run |") && line.contains("reprobisect-build-"))
+                    .count(),
+                2,
+                "{log}; {details}"
+            );
+            let error = Command::new("docker")
+                .env("PATH", &path)
+                .env("PROBE_ROOT", project.path())
+                .env("PROBE_MODE", "failed-build-spawn")
+                .arg("version")
+                .spawn()
+                .expect_err(
+                    "must fail at OS spawn before any child, not an executed build failure",
+                );
+            #[cfg(target_os = "linux")]
+            assert_eq!(error.raw_os_error(), Some(40), "fatal ELOOP: {error}");
+            #[cfg(not(target_os = "linux"))]
+            let _ = error;
+            assert_eq!(
+                std::fs::read_to_string(project.path().join("runtime.log")).unwrap(),
+                log
+            );
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let report = if policy.is_some() {
+                serde_json::from_slice::<serde_json::Value>(
+                    &std::fs::read(
+                        project
+                            .path()
+                            .join(value["report"]["path"].as_str().unwrap()),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            } else {
+                value.clone()
+            };
+            assert_eq!(report["runs"].as_array().unwrap().len(), 2, "{details}");
+            assert_eq!(
+                output.status.code(),
+                Some(5),
+                "{route}/{policy:?}: {details}"
+            );
+            assert_eq!(receipt["completed"], false, "{details}");
+            assert_eq!(
+                receipt["completion_reason"], "operational_error",
+                "{details}"
+            );
+            assert_eq!(
+                receipt["charged_dispatches"], 48,
+                "complete first promotion group charged without refund; {details}"
+            );
+            assert_eq!(
+                report["interventions"].as_array().unwrap().len(),
+                1,
+                "no second dimension after failed spawn; {details}"
+            );
+            let owned = receipt["owned_containers"].as_array().unwrap();
+            assert_eq!(
+                owned.len(),
+                4,
+                "probe, two baselines and one non-dispatched build; {details}"
+            );
+            assert!(
+                owned[..3]
+                    .iter()
+                    .all(|v| v["creation_outcome"] == "acknowledged"
+                        && v["cleanup_verified"] == true),
+                "{details}"
+            );
+            assert_eq!(owned[3]["creation_outcome"], "not_dispatched", "{details}");
+            assert!(owned[3]["container_id"].is_null(), "{details}");
+            assert_eq!(owned[3]["cleanup_verified"], true, "{details}");
+            assert_eq!(
+                log.lines().filter(|line| line.starts_with("rm |")).count(),
+                3,
+                "no removal against the failed spawn; {log}"
+            );
+            if policy.is_some() {
+                assert_eq!(value["completion"]["completed"], false, "{details}");
+                assert_eq!(
+                    value["completion"]["reason"], "operational_error",
+                    "{details}"
+                );
+                assert_eq!(value["coverage"]["complete"], false, "{details}");
+                assert_eq!(value["policy"]["passed"], false, "{details}");
+            }
+        }
+    }
+}
+
+#[test]
+fn public_fix_interrupted_patch_verification_keeps_partial_evidence() {
+    for mode in ["fix-verify-stable", "fix-verify-timeout"] {
+        let project = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".reprobisect.toml"),
+            r#"
+[build]
+image='unused'
+command=['make']
+outputs=['out']
+timeout_seconds=1
+log_capture_max_bytes=65536
+[experiments]
+control_runs=2
+intervention_runs=2
+confirmation_runs=1
+stochastic_runs=4
+interaction_runs=2
+[experiments.dimensions]
+network_access=false
+source_path=false
+build_path=false
+source_date_epoch=true
+timezone=false
+locale=false
+hostname=false
+source_mtime=false
+cpu_count=false
+umask=false
+directory_order=false
+[execution]
+max_dispatches=4096
+total_timeout_seconds=60
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("Makefile"),
+            "all:\n\tprintf artifact > out\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("source.txt"),
+            "unchanged original project\n",
+        )
+        .unwrap();
+        let originals: Vec<_> = [".reprobisect.toml", "Makefile", "source.txt"]
+            .into_iter()
+            .map(|name| (name, std::fs::read(project.path().join(name)).unwrap()))
+            .collect();
+        let output = double_command(project.path(), mode)
+            .env("PROBE_ROOT", runtime.path())
+            .env("TMPDIR", temporary.path())
+            .env("TMP", temporary.path())
+            .env("TEMP", temporary.path())
+            .args(["fix", "--verify", "--format", "json"])
+            .arg(project.path())
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let receipt = execution_receipt(project.path());
+        let details = execution_failure_details("patched-copy-verification", &receipt, &output);
+        for (name, bytes) in originals {
+            assert_eq!(
+                std::fs::read(project.path().join(name)).unwrap(),
+                bytes,
+                "original checkout changed: {name}; {details}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(project.path().join(".reprobisect/executions"))
+                .unwrap()
+                .count(),
+            1,
+            "one shared receipt; {details}"
+        );
+        assert_eq!(
+            report["diagnosis"]["runs"].as_array().unwrap().len(),
+            2,
+            "{details}"
+        );
+        assert_eq!(
+            report["diagnosis"]["interventions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "{details}"
+        );
+        assert_eq!(
+            report["diagnosis"]["interventions"][0]["runs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "{details}"
+        );
+        assert_eq!(
+            report["diagnosis"]["interventions"][0]["reverted_to_baseline"], true,
+            "{details}"
+        );
+        assert_eq!(
+            report["candidates"].as_array().unwrap().len(),
+            1,
+            "{details}"
+        );
+        assert_eq!(
+            report["candidates"][0]["project_patch"]["path"], "Makefile",
+            "{details}"
+        );
+        assert_eq!(
+            report["verifications"].as_array().unwrap().len(),
+            1,
+            "{details}"
+        );
+        assert_eq!(report["verifications"][0]["attempted"], true, "{details}");
+        assert!(
+            std::fs::read_to_string(runtime.path().join("patched-makefile-observed"))
+                .unwrap()
+                .contains("# ReproBisect candidate:"),
+            "verification must use patched copy; {details}"
+        );
+        assert!(
+            std::fs::read_dir(temporary.path())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("reprobisect-fix-verify-")),
+            "patch TempDir must already have unwound; {details}"
+        );
+        assert!(
+            receipt["owned_containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|owned| owned["creation_outcome"] == "acknowledged"
+                    && owned["cleanup_verified"] == true),
+            "exact-ID cleanup; {details}"
+        );
+        if mode == "fix-verify-stable" {
+            assert_eq!(
+                std::fs::read_to_string(runtime.path().join("build-count")).unwrap(),
+                "9",
+                "five diagnosis plus four verification builds; {details}"
+            );
+            assert_eq!(output.status.code(), Some(0), "{details}");
+            assert_eq!(receipt["completed"], true, "{details}");
+            assert_eq!(report["verifications"][0]["verified"], true, "{details}");
+            assert!(
+                receipt["partial_attempts"].as_array().unwrap().is_empty(),
+                "{details}"
+            );
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(runtime.path().join("build-count")).unwrap(),
+                "6",
+                "first patched-copy build reached before interruption; {details}"
+            );
+            assert_eq!(output.status.code(), Some(5), "{details}");
+            assert_eq!(receipt["completed"], false, "{details}");
+            assert_eq!(receipt["completion_reason"], "attempt_timeout", "{details}");
+            assert_eq!(report["verifications"][0]["verified"], false, "{details}");
+            assert!(
+                report["verifications"][0]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("attempt_timeout"),
+                "{details}"
+            );
+            let references = receipt["partial_attempts"].as_array().unwrap();
+            assert_eq!(references.len(), 1, "{details}");
+            for relative in references {
+                let path = project.path().join(relative.as_str().unwrap());
+                assert!(
+                    path.is_file(),
+                    "partial evidence must survive at original root after temporary-copy deletion: {}; {details}",
+                    path.display()
+                );
+                let partial: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                assert_eq!(
+                    partial["operation_id"], receipt["operation_id"],
+                    "{details}"
+                );
+                assert_eq!(partial["purpose"], "build", "{details}");
+                assert_eq!(partial["completed"], false, "{details}");
+                assert_eq!(partial["completion_reason"], "attempt_timeout", "{details}");
+                assert_eq!(
+                    partial["ordinal"], 1,
+                    "first build in new verification experiment; {details}"
+                );
+                assert_eq!(partial["cleanup_verified"], true, "{details}");
+                assert!(
+                    partial["stdout"]["observed_bytes"].as_u64().unwrap() > 0,
+                    "{details}"
+                );
+                assert!(
+                    partial["stdout"]["text"].as_str().unwrap().len() <= 65536,
+                    "{details}"
+                );
+                assert_eq!(
+                    partial["artifacts"]["artifact_completion"], "unknown",
+                    "{details}"
+                );
+                assert!(
+                    partial["artifacts"]["observations"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|artifact| artifact["logical_path"] == "out"
+                            && artifact["stable_snapshot"] == false
+                            && artifact["artifact_completion"] == "unknown"),
+                    "bounded artifact observations must also survive; {details}"
+                );
+            }
+        }
+    }
+}
