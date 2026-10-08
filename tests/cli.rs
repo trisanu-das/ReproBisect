@@ -2034,3 +2034,1527 @@ total_timeout_seconds=60
         }
     }
 }
+
+// P03 fixtures are private copies; canonical historical fixtures stay untouched.
+fn p03_input(root: &std::path::Path) -> std::path::PathBuf {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(include_bytes!("evidence/phase6-check-v5.json")).unwrap();
+    let secret = "P03_SECRET_do_not_disclose";
+    value["source_digest"] = secret.into();
+    value["notes"] = serde_json::json!([secret]);
+    value["baseline_environment"]["hostname"] = secret.into();
+    value["baseline_environment"]["environment"] = serde_json::json!({"TOKEN": secret});
+    value["runs"][0]["stdout"] = secret.into();
+    value["runs"][0]["stderr"] = secret.into();
+    value["runs"][0]["command"] = serde_json::json!([secret]);
+    value["runs"][0]["image"] = secret.into();
+    value["runs"][0]["working_directory"] = secret.into();
+    value["runs"][0]["effective_environment"] = serde_json::json!({"TOKEN": secret});
+    value["runs"][0]["controlled_environment"]["hostname"] = secret.into();
+    value["runs"][0]["artifacts"][0]["logical_path"] = secret.into();
+    value["runs"][0]["artifacts"][0]["sha256"] = "a".repeat(64).into();
+    value["runs"][0]["artifacts"][0]["semantic_metadata"] = serde_json::json!({
+        "kind": "python_wheel", "attributes": {"Name": secret, "Version": secret, "private": secret}
+    });
+    value["interventions"] = serde_json::json!([{
+        "intervention": {"id": secret, "kind": "hostname", "variable": secret,
+            "baseline_value": secret, "variant_value": secret, "description": secret},
+        "runs": [], "artifact_deltas": [], "changed": false,
+        "reverted_to_baseline": null, "confirmation_run": null, "error": null
+    }]);
+    let path = root.join("input.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    path
+}
+
+fn p03_command() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_reprobisect"))
+}
+
+#[test]
+fn summary_omits_raw_logs_and_controlled_secrets() {
+    use sha2::{Digest, Sha256};
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let original = std::fs::read(&input).unwrap();
+    let empty_path = root.path().join("no-runtime");
+    std::fs::create_dir(&empty_path).unwrap();
+    let output = p03_command()
+        .env("PATH", empty_path)
+        .args(["summary", "--format", "json"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "summary must be offline: {output:?}"
+    );
+    let view: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(view["kind"], "check_report");
+    assert_eq!(view["diagnostic_status"], "reproducible");
+    assert_eq!(view["coverage"]["status"], "unknown");
+    assert_eq!(view["completion"], "unknown");
+    assert_eq!(
+        view["original_input_sha256"],
+        hex::encode(Sha256::digest(&original))
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !text.contains("P03_SECRET"),
+        "default view leaked private data: {text}"
+    );
+    assert!(!text.contains(&root.path().to_string_lossy().to_string()));
+    assert!(
+        view["excluded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s == "raw_logs")
+    );
+    assert_eq!(std::fs::read(&input).unwrap(), original);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+}
+
+#[test]
+fn summary_escapes_workflow_commands() {
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&input).unwrap()).unwrap();
+    let attack = "\n::error::injected\r\n##vso[task.setvariable variable=secret]yes\n<script>alert(1)</script>\u{1b}[31m [link](https://evil) `code` ![x](url) &";
+    value["interventions"][0]["intervention"]["baseline_value"] = attack.into();
+    value["interventions"][0]["intervention"]["variant_value"] = attack.into();
+    std::fs::write(&input, serde_json::to_vec(&value).unwrap()).unwrap();
+    for format in ["json", "markdown"] {
+        let output = p03_command()
+            .args([
+                "summary",
+                "--format",
+                format,
+                "--allow-field",
+                "controlled-values",
+            ])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "safe renderer missing: {output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains("<script>"));
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("::") || l.starts_with("##vso["))
+        );
+        if format == "json" {
+            let view: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                view["controlled_values"][0]["baseline"], attack,
+                "escaped encoding must retain exact selected value"
+            );
+        } else {
+            assert!(!text.contains("[link](https://evil)"));
+            assert!(text.contains("&#58;&#58;error&#58;&#58;"));
+            assert!(text.contains("&lt;script&gt;"));
+        }
+    }
+}
+
+fn p03_preview(
+    input: &std::path::Path,
+    destination: &std::path::Path,
+    fields: &[&str],
+) -> serde_json::Value {
+    let mut command = p03_command();
+    command
+        .arg("export")
+        .arg(input)
+        .arg("--output")
+        .arg(destination);
+    for field in fields {
+        command.args(["--allow-field", field]);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "preview failed: {output:?}");
+    assert!(
+        output.stdout.len() <= 1024 * 1024,
+        "escaped preview must be bounded too"
+    );
+    let text = std::str::from_utf8(&output.stdout).unwrap();
+    assert!(!text.chars().any(|c| matches!(c, '\u{7f}'..='\u{9f}' | '\u{2028}' | '\u{2029}' | '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')));
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn export_preserves_original_evidence_digest() {
+    use sha2::{Digest, Sha256};
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let original = std::fs::read(&input).unwrap();
+    let destination = root.path().join("bundle");
+    let preview = p03_preview(&input, &destination, &[]);
+    assert!(
+        !destination.exists(),
+        "preview must not create the destination"
+    );
+    assert_eq!(
+        preview["original_input_sha256"],
+        hex::encode(Sha256::digest(&original))
+    );
+    assert_eq!(preview["allowed_fields"], serde_json::json!([]));
+    let members = preview["members"].as_array().unwrap();
+    assert_eq!(
+        members
+            .iter()
+            .map(|m| m["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["summary.json", "summary.md", "manifest.json"]
+    );
+    for member in members {
+        let bytes = member["bytes"].as_str().unwrap().as_bytes();
+        assert_eq!(member["sha256"], hex::encode(Sha256::digest(bytes)));
+        assert_eq!(member["size_bytes"].as_u64().unwrap(), bytes.len() as u64);
+        assert!(!String::from_utf8_lossy(bytes).contains("P03_SECRET"));
+        assert!(
+            !String::from_utf8_lossy(bytes).contains(&root.path().to_string_lossy().to_string())
+        );
+    }
+    let output = p03_command()
+        .arg("export")
+        .arg(&input)
+        .arg("--output")
+        .arg(&destination)
+        .arg("--approve")
+        .arg(preview["approval_sha256"].as_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "approved export failed: {output:?}"
+    );
+    assert_eq!(std::fs::read(&input).unwrap(), original);
+    assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 3);
+    for member in members {
+        assert_eq!(
+            std::fs::read(destination.join(member["name"].as_str().unwrap())).unwrap(),
+            member["bytes"].as_str().unwrap().as_bytes()
+        );
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(destination.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["original_input_sha256"],
+        preview["original_input_sha256"]
+    );
+    assert_eq!(manifest["policy_version"], "p03-disclosure-v1");
+    assert_eq!(manifest["renderer_version"], "p03-renderer-v1");
+    assert_eq!(manifest["members"].as_array().unwrap().len(), 2);
+    assert_ne!(
+        preview["original_input_sha256"],
+        preview["members"][0]["sha256"]
+    );
+}
+
+fn p03_directory_link(target: &std::path::Path, link: &std::path::Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        // Junctions need no developer-mode symlink privilege; exercise real reparse ancestors.
+        let output = Command::new("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item",
+                "-ItemType",
+                "Junction",
+                "-Path",
+            ])
+            .arg(link)
+            .arg("-Target")
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "junction fixture failed: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn export_refuses_symlink_and_parent_escape() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let input = p03_input(&real);
+    let alias = root.path().join("alias");
+    p03_directory_link(&real, &alias);
+    let child = real.join("child");
+    std::fs::create_dir(&child).unwrap();
+    for (index, source, destination) in [
+        (0, alias.join("input.json"), real.join("bundle-0")),
+        (1, input.clone(), alias.join("bundle-1")),
+        (2, input.clone(), child.join("..").join("bundle-2")),
+        (
+            3,
+            child.join("..").join("input.json"),
+            real.join("bundle-3"),
+        ),
+    ] {
+        let actual = real.join(format!("bundle-{index}"));
+        let approval = p03_preview(&input, &actual, &[]);
+        let output = p03_command()
+            .arg("export")
+            .arg(&source)
+            .arg("--output")
+            .arg(&destination)
+            .arg("--approve")
+            .arg(approval["approval_sha256"].as_str().unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(5),
+            "path defense {index}: {output:?}"
+        );
+        assert!(!actual.exists(), "path rejection must precede all writes");
+        assert!(output.stdout.is_empty());
+    }
+    #[cfg(unix)]
+    {
+        let link = root.path().join("input-link.json");
+        std::os::unix::fs::symlink(&input, &link).unwrap();
+        let destination = real.join("bundle-file-link");
+        let approval = p03_preview(&input, &destination, &[]);
+        let output = p03_command()
+            .arg("export")
+            .arg(&link)
+            .arg("--output")
+            .arg(&destination)
+            .arg("--approve")
+            .arg(approval["approval_sha256"].as_str().unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(5));
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
+fn summary_supports_historical_evidence_kinds() {
+    use sha2::{Digest, Sha256};
+    let root = tempfile::tempdir().unwrap();
+    for (file, kind) in [
+        ("phase6-check-v5.json", "check_report"),
+        ("phase6-build-failure-v1.json", "build_failure"),
+        ("phase8-build-run-v3.json", "build_run"),
+        ("phase18-build-run-v10.json", "build_run"),
+        ("phase7-fix-v3.json", "fix_report"),
+        (
+            "phase14-comparison-v1.json",
+            "environment_comparison_report",
+        ),
+    ] {
+        let original = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/evidence")
+                .join(file),
+        )
+        .unwrap();
+        let input = root.path().join(file);
+        std::fs::write(&input, &original).unwrap();
+        let output = p03_command().arg("summary").arg(&input).output().unwrap();
+        assert!(output.status.success(), "supported kind {kind}: {output:?}");
+        let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(summary["kind"], kind);
+        assert_eq!(
+            summary["original_input_sha256"],
+            hex::encode(Sha256::digest(&original))
+        );
+        assert_eq!(summary["coverage"]["status"], "unknown");
+        assert!(summary.get("stdout").is_none());
+        assert!(summary.get("diagnosis").is_none());
+        if kind == "build_failure" {
+            assert!(summary["build_exit_code"].as_i64().unwrap() != 0);
+        }
+        if kind == "environment_comparison_report" {
+            assert_eq!(summary["comparison_status"], "equivalent");
+        }
+        let destination = root.path().join(format!("{file}-bundle"));
+        let preview = p03_preview(&input, &destination, &[]);
+        let output = p03_command()
+            .arg("export")
+            .arg(&input)
+            .arg("--output")
+            .arg(&destination)
+            .arg("--approve")
+            .arg(preview["approval_sha256"].as_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "export kind {kind}: {output:?}");
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+    }
+}
+
+#[test]
+fn summary_selection_is_explicit() {
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&input).unwrap()).unwrap();
+    value["runs"][0]["artifacts"][0]["semantic_metadata"]["attributes"]["metadata_version"] =
+        "P03_META_ALLOWED".into();
+    value["runs"][0]["effective_environment"] =
+        serde_json::json!({"PRIVATE_ONLY_ENV": "NEVER_SHARE_ENV"});
+    std::fs::write(&input, serde_json::to_vec(&value).unwrap()).unwrap();
+    let selected = p03_command()
+        .arg("summary")
+        .arg(&input)
+        .args(["--allow-field", "controlled-values"])
+        .output()
+        .unwrap();
+    assert!(selected.status.success());
+    let selected: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
+    assert!(
+        !selected["excluded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "controlled_values"),
+        "selected values must not be labelled excluded"
+    );
+    assert_eq!(
+        selected["controlled_values"][0]["baseline"],
+        "P03_SECRET_do_not_disclose"
+    );
+    let destination = root.path().join("selected");
+    let preview = p03_preview(
+        &input,
+        &destination,
+        &[
+            "package-metadata",
+            "artifact-paths",
+            "controlled-values",
+            "artifact-paths",
+        ],
+    );
+    assert_eq!(
+        preview["allowed_fields"],
+        serde_json::json!(["controlled-values", "artifact-paths", "package-metadata"])
+    );
+    let view: serde_json::Value =
+        serde_json::from_str(preview["members"][0]["bytes"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        view["artifacts"][0]["logical_path"],
+        "P03_SECRET_do_not_disclose"
+    );
+    assert_eq!(
+        view["artifacts"][0]["package_metadata"]["metadata_version"],
+        "P03_META_ALLOWED"
+    );
+    assert!(
+        view["artifacts"][0]["package_metadata"]
+            .get("Name")
+            .is_none()
+    );
+    assert!(
+        !serde_json::to_string(&preview)
+            .unwrap()
+            .contains("NEVER_SHARE_ENV")
+    );
+    assert_eq!(
+        preview["allowed_fields"],
+        p03_preview(
+            &input,
+            &destination,
+            &["controlled-values", "artifact-paths", "package-metadata"]
+        )["allowed_fields"]
+    );
+    for selector in [
+        "raw-logs",
+        "source",
+        "binaries",
+        "ordinary-environment",
+        "/runs/0/stdout",
+    ] {
+        let output = p03_command()
+            .arg("export")
+            .arg(&input)
+            .arg("--output")
+            .arg(&destination)
+            .args(["--allow-field", selector])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
+fn summary_retains_precise_incomplete_execution() {
+    let root = tempfile::tempdir().unwrap();
+    for file in [
+        "phase6-check-v5.json",
+        "phase7-fix-v3.json",
+        "phase14-comparison-v1.json",
+    ] {
+        let original: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/evidence")
+                    .join(file),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for reason in [
+            "budget_exhausted",
+            "deadline_exhausted",
+            "cancelled",
+            "attempt_timeout",
+            "cleanup_failed",
+            "creation_unknown",
+            "operational_error",
+        ] {
+            let mut value = original.clone();
+            value["notes"] = serde_json::json!([
+                format!("execution_completion={reason}"),
+                "PRIVATE_FREE_FORM"
+            ]);
+            let input = root.path().join("partial.json");
+            std::fs::write(&input, serde_json::to_vec(&value).unwrap()).unwrap();
+            let output = p03_command().arg("summary").arg(&input).output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let view: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(view["completion"], "incomplete", "{file}/{reason}");
+            assert_eq!(view["execution_completed"], false);
+            assert_eq!(view["execution_reason"], reason);
+            assert_eq!(view["coverage"]["complete"], false);
+            assert!(view["coverage"]["authoritative"].is_null());
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE_FREE_FORM"));
+        }
+    }
+    let input = p03_input(root.path());
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&input).unwrap()).unwrap();
+    value["runs"] = serde_json::json!([]);
+    value["notes"] = serde_json::json!(["execution_completion=unrecognized_private_text"]);
+    std::fs::write(&input, serde_json::to_vec(&value).unwrap()).unwrap();
+    let output = p03_command().arg("summary").arg(&input).output().unwrap();
+    let view: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        view["diagnostic_status"], "reproducible",
+        "do not rewrite persisted diagnostic truth"
+    );
+    assert_eq!(view["completion"], "unknown");
+    assert!(view["execution_completed"].is_null());
+    assert_eq!(
+        view["coverage"]["status"], "unknown",
+        "an isolated report cannot reconstruct the plan"
+    );
+    assert!(view["coverage"]["complete"].is_null());
+}
+
+#[test]
+fn ci_sidecar_retains_authoritative_incomplete_coverage() {
+    use sha2::{Digest, Sha256};
+    for operation in ["check", "diagnose"] {
+        for limit in ["max_dispatches = 0", "total_timeout_seconds = 0"] {
+            let project = tempfile::tempdir().unwrap();
+            std::fs::write(project.path().join(".reprobisect.toml"), format!("[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\n[execution]\n{limit}\n")).unwrap();
+            let sidecar = project.path().join("summary.json");
+            let output = p03_command()
+                .arg(operation)
+                .arg(project.path())
+                .args(["--ci", "--ci-policy", "report-only", "--summary-output"])
+                .arg(&sidecar)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(5), "partial CI: {output:?}");
+            let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .expect("one frozen envelope, not a second JSON summary");
+            assert_eq!(envelope["completion"]["completed"], false);
+            let view: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&sidecar).expect("opt-in partial sidecar must exist"),
+            )
+            .unwrap();
+            assert_eq!(view["coverage"]["authoritative"], envelope["coverage"]);
+            assert_eq!(view["coverage"]["complete"], false);
+            assert_eq!(view["execution_completed"], false);
+            assert_eq!(
+                view["execution_reason"],
+                if limit.starts_with("max") {
+                    "budget_exhausted"
+                } else {
+                    "deadline_exhausted"
+                }
+            );
+            assert_eq!(view["diagnostic_status"], envelope["diagnostic_status"]);
+            let report = std::fs::read(
+                project
+                    .path()
+                    .join(envelope["report"]["path"].as_str().unwrap()),
+            )
+            .unwrap();
+            assert_eq!(
+                view["original_input_sha256"],
+                hex::encode(Sha256::digest(&report))
+            );
+            assert_eq!(view["original_input_sha256"], envelope["report"]["sha256"]);
+            assert!(
+                !String::from_utf8_lossy(&std::fs::read(&sidecar).unwrap())
+                    .contains(&project.path().to_string_lossy().to_string())
+            );
+            let sentinel = b"create-only sidecar";
+            std::fs::write(&sidecar, sentinel).unwrap();
+            let failed = p03_command()
+                .arg(operation)
+                .arg(project.path())
+                .args(["--ci", "--summary-output"])
+                .arg(&sidecar)
+                .output()
+                .unwrap();
+            assert_eq!(failed.status.code(), Some(5));
+            let failed: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+            assert_eq!(failed["completion"]["reason"], "operational_error");
+            assert!(
+                failed["diagnostic_status"].is_null(),
+                "generic sidecar operational error must not invent a result"
+            );
+            assert_eq!(std::fs::read(&sidecar).unwrap(), sentinel);
+        }
+    }
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join(".reprobisect.toml"), "[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\n[execution]\nmax_dispatches=0\n").unwrap();
+    let sidecar = project.path().join("ordinary-summary.json");
+    let output = p03_command()
+        .arg("check")
+        .arg(project.path())
+        .args(["--format", "json", "--summary-output"])
+        .arg(&sidecar)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "inconclusive");
+    assert!(report.get("policy").is_none());
+    assert!(sidecar.exists());
+}
+
+#[test]
+fn selected_rendering_escapes_unicode_line_and_bidi_controls() {
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let attack = "safe\u{85}::error::injected\u{2028}##vso[x]\u{2029}<script>\u{202e}\u{2066}\u{2069}\u{061c}\u{200e}\u{200f}";
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&input).unwrap()).unwrap();
+    value["interventions"][0]["intervention"]["baseline_value"] = attack.into();
+    value["runs"][0]["artifacts"][0]["logical_path"] = attack.into();
+    value["runs"][0]["artifacts"][0]["semantic_metadata"]["attributes"]["metadata_version"] =
+        attack.into();
+    std::fs::write(&input, serde_json::to_vec(&value).unwrap()).unwrap();
+    for format in ["json", "markdown"] {
+        let output = p03_command()
+            .arg("summary")
+            .arg(&input)
+            .args([
+                "--format",
+                format,
+                "--allow-field",
+                "controlled-values",
+                "--allow-field",
+                "artifact-paths",
+                "--allow-field",
+                "package-metadata",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            !text.chars().any(|c| matches!(
+                c,
+                '\u{85}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202e}'
+                    | '\u{2066}'
+                    | '\u{2069}'
+                    | '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+            )),
+            "raw line/bidi control in {format}"
+        );
+        assert!(!text.contains("<script>"));
+        if format == "json" {
+            let view: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(view["controlled_values"][0]["baseline"], attack);
+            assert_eq!(view["artifacts"][0]["logical_path"], attack);
+            assert_eq!(
+                view["artifacts"][0]["package_metadata"]["metadata_version"],
+                attack
+            );
+        }
+    }
+    let destination = root.path().join("local-\u{202e}-bundle");
+    let preview = p03_preview(
+        &input,
+        &destination,
+        &["controlled-values", "artifact-paths", "package-metadata"],
+    );
+    assert!(
+        preview["destination"]
+            .as_str()
+            .unwrap()
+            .contains('\u{202e}'),
+        "local preview retains exact escaped destination"
+    );
+    let output = p03_command()
+        .arg("export")
+        .arg(&input)
+        .arg("--output")
+        .arg(&destination)
+        .args([
+            "--allow-field",
+            "controlled-values",
+            "--allow-field",
+            "artifact-paths",
+            "--allow-field",
+            "package-metadata",
+            "--approve",
+        ])
+        .arg(preview["approval_sha256"].as_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    for name in ["summary.json", "summary.md", "manifest.json"] {
+        assert!(
+            !String::from_utf8(std::fs::read(destination.join(name)).unwrap())
+                .unwrap()
+                .contains('\u{202e}')
+        );
+    }
+}
+
+#[test]
+fn export_rejects_aggregate_output_over_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&input).unwrap()).unwrap();
+    let mut intervention = value["interventions"][0].clone();
+    for key in ["variable", "baseline_value", "variant_value"] {
+        intervention["intervention"][key] = "x".repeat(768).into();
+    }
+    value["interventions"] = serde_json::Value::Array(vec![intervention; 40]);
+    std::fs::write(&input, serde_json::to_vec(&value).unwrap()).unwrap();
+    let mut total = 0;
+    for format in ["json", "markdown"] {
+        let output = p03_command()
+            .arg("summary")
+            .arg(&input)
+            .args(["--allow-field", "controlled-values", "--format", format])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "each member must be otherwise valid: {output:?}"
+        );
+        assert!(output.stdout.len() <= 128 * 1024);
+        total += output.stdout.len();
+    }
+    assert!(
+        total > 192 * 1024,
+        "fixture must exceed aggregate budget: {total}"
+    );
+    let destination = root.path().join("too-large");
+    let output = p03_command()
+        .arg("export")
+        .arg(&input)
+        .arg("--output")
+        .arg(&destination)
+        .args(["--allow-field", "controlled-values"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "aggregate bound missing; size {total}"
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!destination.exists());
+}
+
+#[test]
+fn derived_output_rejects_unwritable_and_closed_stdout() {
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let destination = root.path().join("preview-only");
+    let sentinel = root.path().join("stdout-sentinel");
+    std::fs::write(&sentinel, b"unchanged").unwrap();
+    for args in [
+        vec!["summary", "--format", "json"],
+        vec!["summary", "--format", "markdown"],
+        vec!["export", "--output", destination.to_str().unwrap()],
+    ] {
+        let output = p03_command()
+            .args(&args)
+            .arg(&input)
+            .stdout(std::process::Stdio::from(
+                std::fs::File::open(&sentinel).unwrap(),
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(5),
+            "read-only output: {output:?}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+        // Actual inherited closed stdout, not a writer mock. On Windows this
+        // uses the MSYS sh from the developer environment, not Linux qualification.
+        let binary = env!("CARGO_BIN_EXE_reprobisect").replace('\\', "/");
+        let output = Command::new("sh")
+            .args(["-c", "exec \"$@\" 1>&-", "p03-closed-stdout"])
+            .arg(binary)
+            .args(&args)
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(5),
+            "closed descriptor must fail: {output:?}"
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
+        assert!(!destination.exists());
+    }
+}
+
+fn p03_approved_export(
+    input: &std::path::Path,
+    destination: &std::path::Path,
+    fields: &[&str],
+    approval: &str,
+) -> std::process::Output {
+    let mut command = p03_command();
+    command
+        .arg("export")
+        .arg(input)
+        .arg("--output")
+        .arg(destination)
+        .arg("--approve")
+        .arg(approval);
+    for field in fields {
+        command.args(["--allow-field", field]);
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn p03_regression_exact_approval_and_create_only_bundle() {
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let original = std::fs::read(&input).unwrap();
+    let destination = root.path().join("approved-bundle");
+    let preview = p03_preview(&input, &destination, &[]);
+    let approval = preview["approval_sha256"].as_str().unwrap();
+    let wrong = p03_approved_export(&input, &destination, &[], &"0".repeat(64));
+    assert_eq!(wrong.status.code(), Some(5));
+    assert!(wrong.stdout.is_empty());
+    assert!(!destination.exists());
+    // Change only omitted data or whitespace: raw identity must still invalidate consent.
+    let mut excluded_change: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    excluded_change["notes"] = serde_json::json!(["DIFFERENT_PRIVATE_NOTE"]);
+    for changed in [
+        serde_json::to_vec(&excluded_change).unwrap(),
+        [original.as_slice(), b" \n"].concat(),
+    ] {
+        std::fs::write(&input, changed).unwrap();
+        let stale = p03_approved_export(&input, &destination, &[], approval);
+        assert_eq!(stale.status.code(), Some(5));
+        assert!(stale.stdout.is_empty());
+        assert!(!destination.exists());
+    }
+    std::fs::write(&input, &original).unwrap();
+    let other_input = root.path().join("other.json");
+    std::fs::write(&other_input, serde_json::to_vec(&excluded_change).unwrap()).unwrap();
+    let stale = p03_approved_export(&other_input, &destination, &[], approval);
+    assert_eq!(stale.status.code(), Some(5));
+    assert!(!destination.exists());
+    for fields in [
+        &["controlled-values"][..],
+        &["artifact-paths"][..],
+        &["package-metadata"][..],
+    ] {
+        let stale = p03_approved_export(&input, &destination, fields, approval);
+        assert_eq!(stale.status.code(), Some(5));
+        assert!(stale.stdout.is_empty());
+        assert!(!destination.exists());
+    }
+    let other_destination = root.path().join("not-approved");
+    let stale = p03_approved_export(&input, &other_destination, &[], approval);
+    assert_eq!(stale.status.code(), Some(5));
+    assert!(stale.stdout.is_empty());
+    assert!(!other_destination.exists());
+    let accepted = p03_approved_export(&input, &destination, &[], approval);
+    assert!(accepted.status.success(), "{accepted:?}");
+    let before: Vec<_> = preview["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let path = destination.join(m["name"].as_str().unwrap());
+            (path.clone(), std::fs::read(path).unwrap())
+        })
+        .collect();
+    let replacement = p03_approved_export(&input, &destination, &[], approval);
+    assert_eq!(replacement.status.code(), Some(5));
+    assert!(replacement.stdout.is_empty());
+    for (path, bytes) in before {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    assert_eq!(std::fs::read(&input).unwrap(), original);
+    let file_destination = root.path().join("existing-file");
+    std::fs::write(&file_destination, b"sentinel").unwrap();
+    let approval = p03_preview(&input, &file_destination, &[]);
+    let rejected = p03_approved_export(
+        &input,
+        &file_destination,
+        &[],
+        approval["approval_sha256"].as_str().unwrap(),
+    );
+    assert_eq!(rejected.status.code(), Some(5));
+    assert_eq!(std::fs::read(file_destination).unwrap(), b"sentinel");
+}
+
+#[test]
+fn p03_regression_valid_approval_rejects_changed_link_ancestors() {
+    let root = tempfile::tempdir().unwrap();
+    let source_dir = root.path().join("source");
+    std::fs::create_dir(&source_dir).unwrap();
+    let input = p03_input(&source_dir);
+    let original = std::fs::read(&input).unwrap();
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("sentinel"), b"untouched").unwrap();
+    let destination = root.path().join("linked-leaf");
+    let preview = p03_preview(&input, &destination, &[]);
+    p03_directory_link(&outside, &destination);
+    let rejected = p03_approved_export(
+        &input,
+        &destination,
+        &[],
+        preview["approval_sha256"].as_str().unwrap(),
+    );
+    assert_eq!(rejected.status.code(), Some(5));
+    assert!(rejected.stdout.is_empty());
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read(outside.join("sentinel")).unwrap(),
+        b"untouched"
+    );
+    let destination = root.path().join("source-swap-bundle");
+    let preview = p03_preview(&input, &destination, &[]);
+    let renamed = root.path().join("renamed-source");
+    std::fs::rename(&source_dir, &renamed).unwrap();
+    p03_directory_link(&renamed, &source_dir);
+    let rejected = p03_approved_export(
+        &input,
+        &destination,
+        &[],
+        preview["approval_sha256"].as_str().unwrap(),
+    );
+    assert_eq!(rejected.status.code(), Some(5));
+    assert!(rejected.stdout.is_empty());
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(renamed.join("input.json")).unwrap(), original);
+    for format in ["json", "markdown"] {
+        let output = p03_command()
+            .arg("summary")
+            .arg(&input)
+            .args(["--format", format])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(5));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn p03_regression_input_field_record_and_render_bounds() {
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let original = std::fs::read(&input).unwrap();
+    let destination = root.path().join("no-oversize-bundle");
+    let mut large = original.clone();
+    large.resize(4 * 1024 * 1024 + 1, b' ');
+    std::fs::write(&input, &large).unwrap();
+    for operation in ["summary", "export"] {
+        let mut command = p03_command();
+        command.arg(operation).arg(&input);
+        if operation == "export" {
+            command.arg("--output").arg(&destination);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(5));
+        assert!(output.stdout.is_empty());
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(&input).unwrap(), large);
+    }
+    let value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    for (field, pointer) in [
+        (
+            "controlled-values",
+            "/interventions/0/intervention/baseline_value",
+        ),
+        ("artifact-paths", "/runs/0/artifacts/0/logical_path"),
+        (
+            "package-metadata",
+            "/runs/0/artifacts/0/semantic_metadata/attributes/metadata_version",
+        ),
+    ] {
+        let mut changed = value.clone();
+        if field == "package-metadata" {
+            changed["runs"][0]["artifacts"][0]["semantic_metadata"]["attributes"]["metadata_version"] =
+                "short".into();
+        }
+        *changed.pointer_mut(pointer).unwrap() = "x".repeat(1025).into();
+        std::fs::write(&input, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(
+            p03_command()
+                .arg("summary")
+                .arg(&input)
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "unselected long private fields are omitted, not copied"
+        );
+        for format in ["json", "markdown"] {
+            let output = p03_command()
+                .arg("summary")
+                .arg(&input)
+                .args(["--format", format, "--allow-field", field])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(5));
+            assert!(output.stdout.is_empty());
+        }
+    }
+    let mut records = value.clone();
+    records["runs"] = serde_json::Value::Array(vec![value["runs"][0].clone(); 129]);
+    std::fs::write(&input, serde_json::to_vec(&records).unwrap()).unwrap();
+    let output = p03_command().arg("summary").arg(&input).output().unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let mut expanded = value.clone();
+    let mut intervention = value["interventions"][0].clone();
+    for key in ["variable", "baseline_value", "variant_value"] {
+        intervention["intervention"][key] = "x".repeat(1024).into();
+    }
+    expanded["interventions"] = serde_json::Value::Array(vec![intervention; 80]);
+    std::fs::write(&input, serde_json::to_vec(&expanded).unwrap()).unwrap();
+    for format in ["json", "markdown"] {
+        let output = p03_command()
+            .arg("summary")
+            .arg(&input)
+            .args(["--format", format, "--allow-field", "controlled-values"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(5));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn p03_regression_sidecar_uses_complete_authoritative_context_and_rejects_unsafe_output() {
+    let project = tempfile::tempdir().unwrap();
+    let sidecar = project.path().join("complete.json");
+    std::fs::write(project.path().join(".reprobisect.toml"), "[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\n[execution]\ntotal_timeout_seconds=60\n[experiments]\ncontrol_runs=2\n[experiments.dimensions]\nbuild_path=false\nsource_date_epoch=false\ntimezone=false\nlocale=false\nhostname=false\n").unwrap();
+    let output = double_command(project.path(), "stable")
+        .arg("diagnose")
+        .arg(project.path())
+        .args(["--ci", "--summary-output"])
+        .arg(&sidecar)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "CLI double, not native runtime qualification: {output:?}"
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let view: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    assert_eq!(envelope["operation"], "diagnose");
+    assert_eq!(envelope["coverage"]["complete"], true);
+    assert_eq!(view["coverage"]["authoritative"], envelope["coverage"]);
+    assert_eq!(view["completion"], "completed");
+    assert_eq!(view["execution_completed"], true);
+    assert_eq!(view["execution_reason"], "completed");
+    assert_eq!(view["diagnostic_status"], "reproducible");
+    assert_eq!(view["original_input_sha256"], envelope["report"]["sha256"]);
+    assert!(!String::from_utf8_lossy(&std::fs::read(&sidecar).unwrap()).contains("actual stdout"));
+    let isolated = p03_command()
+        .arg("summary")
+        .arg(
+            project
+                .path()
+                .join(envelope["report"]["path"].as_str().unwrap()),
+        )
+        .output()
+        .unwrap();
+    let isolated: serde_json::Value = serde_json::from_slice(&isolated.stdout).unwrap();
+    assert_eq!(
+        isolated["coverage"]["status"], "unknown",
+        "standalone input must not fabricate current-run planned scope"
+    );
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join(".reprobisect.toml"), "[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\n[execution]\nmax_dispatches=0\n").unwrap();
+    let outside = project.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let alias = project.path().join("alias");
+    p03_directory_link(&outside, &alias);
+    for path in [
+        alias.join("summary.json"),
+        outside.join("..").join("escape.json"),
+        project.path().join("missing-parent").join("summary.json"),
+    ] {
+        let output = p03_command()
+            .arg("check")
+            .arg(project.path())
+            .args(["--ci", "--summary-output"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(5));
+        let failure: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(failure["completion"]["reason"], "operational_error");
+        assert!(failure["diagnostic_status"].is_null());
+        assert!(!outside.join("summary.json").exists());
+        assert!(!project.path().join("escape.json").exists());
+        assert!(!project.path().join("missing-parent").exists());
+    }
+    std::fs::write(project.path().join(".reprobisect.toml"), "not valid TOML").unwrap();
+    let absent = project.path().join("no-invented-summary.json");
+    let output = p03_command()
+        .arg("check")
+        .arg(project.path())
+        .args(["--ci", "--summary-output"])
+        .arg(&absent)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let failure: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(failure["diagnostic_status"].is_null());
+    assert!(failure["coverage"].is_null());
+    assert!(!absent.exists());
+}
+
+#[test]
+fn derived_output_failure_keeps_exit_five_with_unwritable_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let destination = root.path().join("no-bundle");
+    let sentinel = root.path().join("stderr-sentinel");
+    std::fs::write(&sentinel, b"unchanged").unwrap();
+    for args in [
+        vec!["summary", "--format", "json"],
+        vec!["summary", "--format", "markdown"],
+        vec!["export", "--output", destination.to_str().unwrap()],
+    ] {
+        let success = p03_command()
+            .args(&args)
+            .arg(&input)
+            .stderr(Stdio::from(std::fs::File::open(&sentinel).unwrap()))
+            .output()
+            .unwrap();
+        assert!(success.status.success());
+        assert!(!success.stdout.is_empty());
+        let failure = p03_command()
+            .args(&args)
+            .arg(&input)
+            .stdout(Stdio::from(std::fs::File::open(&sentinel).unwrap()))
+            .stderr(Stdio::from(std::fs::File::open(&sentinel).unwrap()))
+            .output()
+            .unwrap();
+        assert_eq!(
+            failure.status.code(),
+            Some(5),
+            "stderr must not turn a derived transport failure into a panic: {failure:?}"
+        );
+        assert!(failure.stdout.is_empty());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+        assert!(!destination.exists());
+    }
+}
+
+fn p03_approval_for_destination(preview: &serde_json::Value, destination: &str) -> String {
+    // Reconstruct the public binding independently. Verify against a valid
+    // preview first so negative path tests cannot pass only on wrong approval.
+    #[derive(serde::Serialize)]
+    struct Descriptor<'a> {
+        name: &'a str,
+        size_bytes: u64,
+        sha256: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct Manifest<'a> {
+        policy_version: &'a str,
+        renderer_version: &'a str,
+        original_input_sha256: &'a str,
+        allowed_fields: &'a serde_json::Value,
+        members: Vec<Descriptor<'a>>,
+    }
+    #[derive(serde::Serialize)]
+    struct Approval<'a> {
+        manifest: Manifest<'a>,
+        destination: &'a str,
+    }
+    let manifest = Manifest {
+        policy_version: preview["policy_version"].as_str().unwrap(),
+        renderer_version: preview["renderer_version"].as_str().unwrap(),
+        original_input_sha256: preview["original_input_sha256"].as_str().unwrap(),
+        allowed_fields: &preview["allowed_fields"],
+        members: preview["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|member| Descriptor {
+                name: member["name"].as_str().unwrap(),
+                size_bytes: member["size_bytes"].as_u64().unwrap(),
+                sha256: member["sha256"].as_str().unwrap(),
+            })
+            .collect(),
+    };
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(&Approval {
+            manifest,
+            destination,
+        })
+        .unwrap(),
+    ))
+}
+
+#[test]
+fn p03_regression_device_names_and_prefixes_fail_before_preview_or_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let preview = p03_preview(&input, &root.path().join("safe"), &[]);
+    assert_eq!(
+        p03_approval_for_destination(&preview, preview["destination"].as_str().unwrap()),
+        preview["approval_sha256"]
+    );
+    for name in [
+        "CON",
+        "con.json",
+        "NUL.log",
+        "AUX",
+        "PRN",
+        "COM1",
+        "LPT9",
+        "COM¹",
+        "LPT²",
+        "CONIN$",
+        "CONOUT$",
+        "trailing.",
+        "trailing ",
+        "stream:ads",
+        "wild*card",
+        "wild?card",
+        "pipe|name",
+    ] {
+        let output_path = root.path().join(name);
+        let canonical_destination = std::fs::canonicalize(root.path()).unwrap().join(name);
+        let approval =
+            p03_approval_for_destination(&preview, canonical_destination.to_str().unwrap());
+        for approved in [false, true] {
+            let mut command = p03_command();
+            command
+                .arg("export")
+                .arg(&input)
+                .arg("--output")
+                .arg(&output_path);
+            if approved {
+                command.arg("--approve").arg(&approval);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(5),
+                "unsafe name must fail even with otherwise matching content approval: {name}/{approved}: {output:?}"
+            );
+            assert!(output.stdout.is_empty());
+        }
+    }
+    #[cfg(windows)]
+    for path in [
+        r"C:relative-bundle",
+        r"\unexpected-root",
+        r"\\?\C:\unexpected-bundle",
+        r"\\.\NUL",
+        r"\\?\GLOBALROOT\Device\HarddiskVolume1\unexpected-bundle",
+    ] {
+        let output = p03_command()
+            .arg("export")
+            .arg(&input)
+            .args(["--output", path])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(5),
+            "unexpected prefix must fail before preview: {path}: {output:?}"
+        );
+        assert!(output.stdout.is_empty());
+    }
+    assert_eq!(
+        std::fs::read_dir(root.path()).unwrap().count(),
+        1,
+        "no unsafe leaf created"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn p03_unix_fifo_source_is_rejected_without_blocking_open() {
+    let root = tempfile::tempdir().unwrap();
+    let fifo = root.path().join("source-fifo");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut child = p03_command()
+        .arg("summary")
+        .arg(&fifo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if std::time::Instant::now() >= until {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "nonregular source blocked in open instead of fail-closed inspection: {output:?}"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn p03_linux_sigint_sidecar_keeps_precise_incomplete_state() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join(".reprobisect.toml"), "[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\ntimeout_seconds=20\n[execution]\ntotal_timeout_seconds=60\n").unwrap();
+    let sidecar = project.path().join("cancelled-summary.json");
+    let child = double_command(project.path(), "timeout")
+        .arg("check")
+        .arg(project.path())
+        .args(["--ci", "--ci-policy", "report-only", "--summary-output"])
+        .arg(&sidecar)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !project.path().join("build-name").exists() {
+        assert!(
+            std::time::Instant::now() < until,
+            "active build launch was not observed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = bounded_wait(child);
+    assert_eq!(output.status.code(), Some(5));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let view: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    assert_eq!(view["diagnostic_status"], envelope["diagnostic_status"]);
+    assert_eq!(view["coverage"]["authoritative"], envelope["coverage"]);
+    assert_eq!(view["coverage"]["complete"], false);
+    assert_eq!(view["execution_completed"], false);
+    assert_eq!(view["execution_reason"], "cancelled");
+    assert_eq!(view["original_input_sha256"], envelope["report"]["sha256"]);
+}
+
+#[test]
+fn p03_json_neutralizes_embedded_legacy_ci_commands() {
+    use sha2::{Digest, Sha256};
+    let root = tempfile::tempdir().unwrap();
+    let input = p03_input(root.path());
+    let marker = "##vso[task.logissue type=error;]P03_INERT_##[error]P03_INERT";
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&input).unwrap()).unwrap();
+    value["interventions"][0]["intervention"]["baseline_value"] = marker.into();
+    value["interventions"][0]["intervention"]["variant_value"] = marker.into();
+    std::fs::write(&input, serde_json::to_vec(&value).unwrap()).unwrap();
+    let original = std::fs::read(&input).unwrap();
+    let summary = p03_command()
+        .arg("summary")
+        .arg(&input)
+        .args(["--format", "json", "--allow-field", "controlled-values"])
+        .output()
+        .unwrap();
+    assert!(
+        summary.status.success(),
+        "typed summary fixture failed: {summary:?}"
+    );
+    let view: serde_json::Value = serde_json::from_slice(&summary.stdout).unwrap();
+    assert_eq!(view["controlled_values"][0]["baseline"], marker);
+    assert_eq!(view["controlled_values"][0]["variant"], marker);
+    assert_eq!(
+        view["original_input_sha256"],
+        hex::encode(Sha256::digest(&original))
+    );
+    let text = std::str::from_utf8(&summary.stdout).unwrap();
+    for prefix in ["##vso[", "##["] {
+        assert!(
+            !text.contains(prefix),
+            "quoted summary values retain an active CI delimiter: {prefix:?}"
+        );
+    }
+    for (index, fields) in [&[][..], &["controlled-values"][..]]
+        .into_iter()
+        .enumerate()
+    {
+        let leaf = format!("bundle-{index}-{marker}");
+        let destination = root.path().join(&leaf);
+        let mut command = p03_command();
+        command
+            .arg("export")
+            .arg(&input)
+            .arg("--output")
+            .arg(&destination);
+        for field in fields {
+            command.args(["--allow-field", field]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "legal marker destination preview failed: {output:?}"
+        );
+        assert!(!destination.exists());
+        let text = std::str::from_utf8(&output.stdout).unwrap();
+        let preview: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(preview["destination"].as_str().unwrap().ends_with(&leaf));
+        assert_eq!(
+            preview["original_input_sha256"],
+            hex::encode(Sha256::digest(&original))
+        );
+        for prefix in ["##vso[", "##["] {
+            assert!(
+                !text.contains(prefix),
+                "default or selected preview retains an active CI delimiter: {prefix:?}"
+            );
+        }
+        let mut approved = p03_command();
+        approved
+            .arg("export")
+            .arg(&input)
+            .arg("--output")
+            .arg(&destination)
+            .arg("--approve")
+            .arg(preview["approval_sha256"].as_str().unwrap());
+        for field in fields {
+            approved.args(["--allow-field", field]);
+        }
+        let exported = approved.output().unwrap();
+        assert!(
+            exported.status.success(),
+            "exact approved payload rejected: {exported:?}"
+        );
+        for member in preview["members"].as_array().unwrap() {
+            let bytes = std::fs::read(destination.join(member["name"].as_str().unwrap())).unwrap();
+            assert_eq!(bytes, member["bytes"].as_str().unwrap().as_bytes());
+            assert_eq!(member["sha256"], hex::encode(Sha256::digest(&bytes)));
+            assert_eq!(member["size_bytes"].as_u64().unwrap(), bytes.len() as u64);
+        }
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+    }
+}
+
+#[test]
+fn p03_non_ci_sidecar_failure_keeps_exit_five_with_unwritable_stderr() {
+    for operation in ["check", "diagnose"] {
+        for format in ["text", "json"] {
+            for ci in [false, true] {
+                for read_only_stderr in [false, true] {
+                    let project = tempfile::tempdir().unwrap();
+                    std::fs::write(
+                        project.path().join(".reprobisect.toml"),
+                        "[build]\nimage='unused'\ncommand=['true']\noutputs=['out']\n[execution]\nmax_dispatches=0\n",
+                    ).unwrap();
+                    let sidecar = project.path().join("existing-summary.json");
+                    let stderr = project.path().join("stderr-sentinel");
+                    std::fs::write(&sidecar, b"do not replace").unwrap();
+                    std::fs::write(&stderr, b"unchanged").unwrap();
+                    let mut command = p03_command();
+                    command
+                        .arg(operation)
+                        .arg(project.path())
+                        .args(["--format", format, "--summary-output"])
+                        .arg(&sidecar);
+                    if ci {
+                        command.arg("--ci");
+                    }
+                    if read_only_stderr {
+                        command.stderr(Stdio::from(std::fs::File::open(&stderr).unwrap()));
+                    }
+                    let output = command.output().unwrap();
+                    assert_eq!(
+                        output.status.code(),
+                        Some(5),
+                        "opt-in create-only sidecar failure must not panic on stderr: operation={operation} format={format} ci={ci} read_only_stderr={read_only_stderr}; {output:?}",
+                    );
+                    assert_eq!(std::fs::read(&sidecar).unwrap(), b"do not replace");
+                    assert_eq!(std::fs::read(&stderr).unwrap(), b"unchanged");
+                    let receipts: Vec<_> =
+                        std::fs::read_dir(project.path().join(".reprobisect/executions"))
+                            .unwrap()
+                            .map(|entry| entry.unwrap().path())
+                            .collect();
+                    assert_eq!(receipts.len(), 1);
+                    let receipt: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&receipts[0]).unwrap()).unwrap();
+                    assert_eq!(receipt["charged_dispatches"], 0);
+                    assert_eq!(receipt["completed"], false);
+                    assert_eq!(receipt["completion_reason"], "budget_exhausted");
+                    if ci {
+                        let envelope: serde_json::Value =
+                            serde_json::from_slice(&output.stdout).unwrap();
+                        assert_eq!(envelope["completion"]["reason"], "operational_error");
+                        assert_eq!(envelope["completion"]["completed"], false);
+                    }
+                }
+            }
+        }
+    }
+}

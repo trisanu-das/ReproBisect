@@ -3,6 +3,7 @@ mod ci;
 mod cli;
 mod compat;
 mod config;
+mod disclosure;
 mod doctor;
 mod engine;
 mod environment;
@@ -31,6 +32,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Compare(args) => cli::run_compare(args),
         Command::Fix(args) => cli::run_fix(args),
         Command::Evidence(args) => cli::run_evidence(args),
+        Command::Summary(args) => cli::run_summary(args),
+        Command::Export(args) => cli::run_export(args),
     }
 }
 
@@ -66,6 +69,11 @@ fn main() {
         }
         Err(error) => error.exit(),
     };
+    let derived_requested = match &cli.command {
+        Command::Summary(_) | Command::Export(_) => true,
+        Command::Check(args) | Command::Diagnose(args) => args.summary_output.is_some(),
+        _ => false,
+    };
     let policy = match &cli.command {
         Command::Check(args) | Command::Diagnose(args) => args.ci_policy.unwrap_or_default(),
         _ => ci::CiPolicy::default(),
@@ -76,6 +84,8 @@ fn main() {
                 ci::print_failure("operational_error", EXIT_ERROR, operation.unwrap(), policy)
             });
             std::process::exit(code);
+        } else if derived_requested {
+            ci::write_diagnostic(&format_args!("error: {error:#}"));
         } else {
             eprintln!("error: {error:#}");
         }

@@ -53,6 +53,60 @@ pub enum Command {
 
     /// Validate and normalize persisted ReproBisect JSON evidence from supported historical schemas.
     Evidence(EvidenceArgs),
+
+    /// Print an offline, read-only allowlisted derived summary (not canonical evidence).
+    Summary(SummaryArgs),
+
+    /// Preview a bounded offline bundle; create it only with exact content/destination approval.
+    Export(ExportArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SummaryFormat {
+    Json,
+    Markdown,
+}
+
+#[derive(Debug, Args)]
+pub struct SummaryArgs {
+    /// Persisted evidence input; never changed by summary.
+    pub input: PathBuf,
+    #[arg(long, value_enum, default_value = "json")]
+    pub format: SummaryFormat,
+    /// Explicitly select controlled values, artifact paths or package metadata; may disclose secrets.
+    #[arg(long, value_enum)]
+    pub allow_field: Vec<crate::disclosure::AllowedField>,
+}
+
+pub fn run_summary(args: SummaryArgs) -> Result<()> {
+    let view = crate::disclosure::load_summary(&args.input, &args.allow_field)?;
+    let bytes = match args.format {
+        SummaryFormat::Json => crate::disclosure::json_bytes(&view)?,
+        SummaryFormat::Markdown => crate::disclosure::markdown_bytes(&view)?,
+    };
+    crate::disclosure::print_bytes(&bytes)
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    pub input: PathBuf,
+    /// New local directory; its parent must already exist.
+    #[arg(long)]
+    pub output: PathBuf,
+    #[arg(long, value_enum)]
+    pub allow_field: Vec<crate::disclosure::AllowedField>,
+    /// SHA-256 from the exact preview. Content binding, not authentication.
+    #[arg(long)]
+    pub approve: Option<String>,
+}
+
+pub fn run_export(args: ExportArgs) -> Result<()> {
+    crate::disclosure::export(
+        &args.input,
+        &args.output,
+        &args.allow_field,
+        args.approve.as_deref(),
+    )
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -114,6 +168,10 @@ pub struct CheckArgs {
     /// CI job policy; diagnostic status is never rewritten.
     #[arg(long, value_enum, requires = "ci")]
     pub ci_policy: Option<crate::ci::CiPolicy>,
+
+    /// Opt-in create-only local JSON summary. Does not change stdout's ordinary/CI format.
+    #[arg(long)]
+    pub summary_output: Option<PathBuf>,
 
     /// Project directory containing .reprobisect.toml.
     #[arg(default_value = ".")]
@@ -299,7 +357,7 @@ pub fn run_check(args: CheckArgs, operation: &'static str) -> Result<()> {
 
     let report_data = check_project(&project, &config, &options)?;
 
-    if args.ci {
+    if args.ci || args.summary_output.is_some() {
         let mut envelope = crate::ci::from_report(
             &project,
             &report_data,
@@ -308,9 +366,18 @@ pub fn run_check(args: CheckArgs, operation: &'static str) -> Result<()> {
             args.ci_policy.unwrap_or_default(),
         )?;
         envelope.operation = operation;
-        let exit_code = envelope.policy.exit_code;
-        report::print_automation_json(&envelope)?;
-        std::process::exit(exit_code);
+        if let Some(path) = &args.summary_output {
+            let reference = envelope
+                .report
+                .as_ref()
+                .context("summary requires a persisted report")?;
+            crate::disclosure::write_sidecar(&args.project.join(&reference.path), path, &envelope)?;
+        }
+        if args.ci {
+            let exit_code = envelope.policy.exit_code;
+            report::print_automation_json(&envelope)?;
+            std::process::exit(exit_code);
+        }
     }
 
     match args.format {

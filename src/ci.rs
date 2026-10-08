@@ -57,7 +57,7 @@ pub struct ReportReference {
     pub schema_version: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Counts {
     pub planned: usize,
     pub attempted: usize,
@@ -66,7 +66,7 @@ pub struct Counts {
     pub failed: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InteractionCoverage {
     pub status: &'static str,
     pub strategy: &'static str,
@@ -121,7 +121,7 @@ fn interaction_coverage(
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Coverage {
     pub complete: bool,
     pub controls: Counts,
